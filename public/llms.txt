@@ -1,0 +1,10 @@
+# iPhone Repair Medan - Sistem Pengelolaan Inventaris
+
+> Sistem manajemen inventaris komponen smartphone dan sparepart iPhone multi-cabang, pencatatan stok, barang masuk/keluar/rusak, return, analisis laporan, dan absensi karyawan.
+
+## Modul Utama
+- **Inventaris & Sparepart**: Pencatatan stok multi-cabang dengan status minimum buffer.
+- **Transaksi Barang**: Masuk, keluar, dan pencatatan barang rusak/cacat.
+- **Klaim Return**: Penanganan komplain pelanggan & garansi sparepart.
+- **Absensi & Presensi**: Jam masuk dan pulang karyawan berbasis peran kerja.
+- **Keamanan Akun**: Otentikasi OTP melalui Gmail dan perlindungan data multi-toko.

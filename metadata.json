@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Final Project Sistem Inventory dan Absensi Multi-Toko",
+  "description": "Sistem manajemen inventaris komponen smartphone/iPhone multi-cabang, pencatatan stok, barang masuk/keluar/rusak, return, analisis laporan, dan absensi karyawan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <defs>
+    <linearGradient id="logoBgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stopColor="#1e3a8a" />
+      <stop offset="50%" stopColor="#2563eb" />
+      <stop offset="100%" stopColor="#4f46e5" />
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.8" />
+      <stop offset="100%" stopColor="#a855f7" stopOpacity="0.8" />
+    </linearGradient>
+  </defs>
+  <!-- Background Rounded Shield / Badge -->
+  <rect width="200" height="200" rx="44" fill="url(#logoBgGrad)" />
+  <rect x="4" y="4" width="192" height="192" rx="40" stroke="white" stroke-width="2" stroke-opacity="0.15" fill="none" />
+  
+  <!-- Smartphone Frame -->
+  <rect x="62" y="32" width="76" height="136" rx="16" fill="#0f172a" stroke="#93c5fd" stroke-width="3.5" />
+  
+  <!-- Screen Area -->
+  <rect x="69" y="45" width="62" height="110" rx="8" fill="#1e293b" />
+  
+  <!-- Dynamic Notch -->
+  <rect x="88" y="37" width="24" height="4" rx="2" fill="#64748b" />
+  
+  <!-- Internal Tech Repair Symbol: Wrench & Circuit -->
+  <!-- Circuit tracks inside screen -->
+  <path d="M78 65 L95 65 L105 80 L122 80" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="78" cy="65" r="3.5" fill="#38bdf8" />
+  <circle cx="122" cy="80" r="3.5" fill="#38bdf8" />
+  
+  <!-- Crossed Repair Wrench and Screwdriver / Shield Motif -->
+  <g transform="translate(100, 112)">
+    <!-- Wrench angled -->
+    <path d="M-18 -18 L18 18 M-12 -22 C-16 -26 -22 -22 -22 -18 C-22 -14 -18 -12 -18 -12 L-10 -4 L-4 -10 L-12 -18 Z" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="white" />
+    <!-- Gear / Nut Central Accent -->
+    <circle cx="0" cy="0" r="14" fill="#2563eb" stroke="white" stroke-width="3" />
+    <path d="M0 -6 L0 6 M-6 0 L6 0" stroke="white" stroke-width="2.5" stroke-linecap="round" />
+  </g>
+  
+  <!-- Bottom Home Bar -->
+  <rect x="86" y="160" width="28" height="3" rx="1.5" fill="#94a3b8" />
+</svg>
