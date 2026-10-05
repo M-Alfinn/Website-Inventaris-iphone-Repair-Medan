@@ -460,7 +460,7 @@ export const LoginPage: React.FC = () => {
               <div className="inline-flex items-center justify-center gap-2.5 mb-1.5">
                 <div className="w-10 h-10 rounded-xl bg-white shadow-sm border border-slate-100 flex items-center justify-center overflow-hidden">
                   <img
-                    src="/images/logo.svg"
+                    src="/images/logo.png"
                     alt="Logo Toko"
                     className="w-full h-full object-contain scale-[1.25]"
                     onError={(e) => {
