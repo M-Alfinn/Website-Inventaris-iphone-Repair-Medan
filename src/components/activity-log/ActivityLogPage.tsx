@@ -539,7 +539,7 @@ export const ActivityLogPage: React.FC = () => {
       <ConfirmationModal
         isOpen={Boolean(logToDelete)}
         title="Hapus Catatan Log Aktivitas"
-        message="Apakah Anda yakin ingin menghapus catatan log ini secara permanen dari sistem?"
+        message="Apakah Anda yakin ingin menghapus catatan log ini?"
         confirmText="Ya, Hapus Log"
         cancelText="Batal"
         confirmVariant="danger"

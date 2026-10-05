@@ -145,7 +145,7 @@ interface AppContextType {
   toasts: ToastMessage[];
 
   // Auth & Nav
-  login: (identifier: string, passwordPlain?: string, role?: UserRole, storeId?: string) => { success: boolean; mustChangePassword?: boolean; message?: string };
+  login: (identifier: string, passwordPlain?: string, role?: UserRole, storeId?: string) => Promise<{ success: boolean; mustChangePassword?: boolean; message?: string }>;
   logout: () => void;
   selectStore: (storeId: string | null) => void;
   navigateTo: (page: NavigationPage) => void;
@@ -589,12 +589,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const timer = setTimeout(async () => {
       try {
+        // Only Super Admin can push the full users collection to MySQL
+        const usersToSync = currentUser.role === 'SUPER_ADMIN' ? users : undefined;
         const res = await fetch('/api/sync-all', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             stores,
-            users,
+            users: usersToSync,
             categories,
             iphoneSeries,
             inventory,
@@ -603,8 +605,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             attendance,
             activityLogs,
             notifications,
+            callerRole: currentUser.role,
+            callerUserId: currentUser.id,
           }),
         });
+
+        if (res.status === 403) {
+          const errJson = await res.json().catch(() => ({}));
+          if (errJson?.code === 'USER_DELETED') {
+            forceLogoutInactiveUser('DELETED');
+            return;
+          }
+        }
+
         if (res.ok) {
           const resJson = await res.json();
           if (resJson.success) {
@@ -623,11 +636,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearTimeout(timer);
   }, [currentUser, stores, users, categories, iphoneSeries, inventory, transactions, returns, attendance, activityLogs, notifications]);
 
-  // Keep currentUser synchronized with latest changes in users collection
+  // Keep currentUser synchronized with latest changes in users collection, or immediately kick out if deleted/deactivated
   useEffect(() => {
     if (currentUser) {
-      const liveUser = users.find((u) => u.id === currentUser.id);
-      if (liveUser) {
+      if (currentUser.role !== 'SUPER_ADMIN') {
+        const liveUser = users.find((u) => u.id === currentUser.id);
+        if (!liveUser) {
+          forceLogoutInactiveUser('DELETED');
+          return;
+        }
+        if (liveUser.status === 'NONAKTIF') {
+          forceLogoutInactiveUser('NONAKTIF');
+          return;
+        }
         if (
           liveUser.position !== currentUser.position ||
           liveUser.status_peran_kerja !== currentUser.status_peran_kerja ||
@@ -645,7 +666,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
     }
-  }, [users]);
+  }, [users, currentUser]);
 
   // Initial load: Check MySQL connection & load live MySQL data if available
   useEffect(() => {
@@ -717,16 +738,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     initDatabaseCheck();
   }, []);
 
-  // Cross-device real-time sync (HP <-> Laptop sync)
+  // Cross-device real-time sync (HP <-> Laptop sync & Login screen real-time sync)
   useEffect(() => {
-    if (!currentUser) return;
-
-    // 1. Silent background polling every 4 seconds to sync data across devices
+    // 1. Silent background polling every 2.5 seconds to sync data across devices (runs both when logged in and on login screen)
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && !document.hidden) {
         fetchDataFromMySQL().catch(() => {});
       }
-    }, 4000);
+    }, 2500);
 
     // 2. Fetch immediately when user focuses the tab or returns to the window
     const handleFocus = () => {
@@ -743,7 +762,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleFocus);
     };
-  }, [currentUser]);
+  }, []);
 
   const activeStore = useMemo(() => {
     if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
@@ -772,6 +791,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const removeToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  // Immediate kick-out for deleted or deactivated users across active browser tabs
+  const forceLogoutInactiveUser = (reason: 'DELETED' | 'NONAKTIF') => {
+    setCurrentUser(null);
+    setActiveStoreId(null);
+    try {
+      sessionStorage.removeItem('iphone_pos_session_user_v1');
+      sessionStorage.removeItem('iphone_pos_session_store_id_v1');
+      sessionStorage.removeItem('iphone_pos_active_page_v1');
+      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_STORE_ID);
+    } catch {}
+    setSidebarOpen(false);
+    setIsFirstLoginModalOpen(false);
+    setCurrentPage('DASHBOARD_TOKO');
+    showToast(
+      'Sesi Diakhiri',
+      reason === 'DELETED'
+        ? 'Akun Anda telah dihapus oleh administrator. Sesi telah diakhiri dan akses ditutup.'
+        : 'Akun Anda telah dinonaktifkan oleh administrator. Silakan hubungi Super Admin.',
+      'error'
+    );
+  };
+
+  const ensureUserSessionValid = (): boolean => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'SUPER_ADMIN') return true;
+    const live = users.find((u) => u.id === currentUser.id);
+    if (!live) {
+      forceLogoutInactiveUser('DELETED');
+      return false;
+    }
+    if (live.status === 'NONAKTIF') {
+      forceLogoutInactiveUser('NONAKTIF');
+      return false;
+    }
+    return true;
   };
 
   const logActivity = (
@@ -890,23 +947,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Auth Functions
-  const login = (
+  const login = async (
     identifier: string,
     passwordPlain?: string,
     role?: UserRole,
     storeId?: string
-  ): { success: boolean; mustChangePassword?: boolean; message?: string } => {
+  ): Promise<{ success: boolean; mustChangePassword?: boolean; message?: string }> => {
     const cleanId = identifier.trim().toLowerCase();
     const cleanPhone = identifier.replace(/\D/g, '');
 
-    let foundUser = users.find((u) => {
-      const matchEmail = u.email && u.email.toLowerCase() === cleanId;
-      const matchLinkedEmail = u.email_tertaut && u.email_tertaut.toLowerCase() === cleanId;
-      const matchUsername = u.username && u.username.toLowerCase() === cleanId;
-      const matchSuper = (cleanId === 'superadmin' || cleanId === 'super admin') && u.role === 'SUPER_ADMIN';
-      const matchPhone = cleanPhone && ((u.nomor_telepon && u.nomor_telepon.replace(/\D/g, '') === cleanPhone) || (u.no_hp && u.no_hp.replace(/\D/g, '') === cleanPhone));
-      return matchEmail || matchLinkedEmail || matchUsername || matchSuper || matchPhone;
-    });
+    const findMatch = (userList: User[]) => {
+      return userList.find((u) => {
+        const matchEmail = u.email && u.email.toLowerCase() === cleanId;
+        const matchLinkedEmail = u.email_tertaut && u.email_tertaut.toLowerCase() === cleanId;
+        const matchUsername = u.username && u.username.toLowerCase() === cleanId;
+        const matchSuper = (cleanId === 'superadmin' || cleanId === 'super admin' || cleanId === 'superadmin@gmail.com') && u.role === 'SUPER_ADMIN';
+        const matchPhone = cleanPhone && ((u.nomor_telepon && u.nomor_telepon.replace(/\D/g, '') === cleanPhone) || (u.no_hp && u.no_hp.replace(/\D/g, '') === cleanPhone));
+        return matchEmail || matchLinkedEmail || matchUsername || matchSuper || matchPhone;
+      });
+    };
+
+    let foundUser = findMatch(users);
+
+    // Real-Time Sync: Jika akun tidak ditemukan di memori browser saat ini (misal akun Joko baru dibuat di browser/perangkat lain),
+    // lakukan query langsung ke database secara instan tanpa perlu user me-refresh halaman!
+    if (!foundUser) {
+      try {
+        const res = await fetch('/api/data');
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.data && Array.isArray(json.data.users)) {
+            const freshUsers: User[] = json.data.users;
+            setUsers(freshUsers);
+            foundUser = findMatch(freshUsers);
+          }
+        }
+      } catch (err) {
+        console.warn('Real-time auth fetch error:', err);
+      }
+    }
 
     if (!foundUser && role) {
       foundUser = users.find((u) => u.role === role);
@@ -1661,8 +1740,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (profileData.email) {
       const cleanEmail = profileData.email.trim().toLowerCase();
       if (cleanEmail !== (currentUser.email || '').trim().toLowerCase()) {
-        // If email is already verified, it cannot be changed directly without OTP verification!
-        if (currentUser.is_email_verified) {
+        // If email is already verified, it cannot be changed directly without OTP verification UNLESS it is SUPER_ADMIN
+        if (currentUser.is_email_verified && currentUser.role !== 'SUPER_ADMIN') {
           showToast(
             'Verifikasi OTP Diperlukan',
             'Email akun yang sudah terverifikasi hanya dapat diganti melalui verifikasi kode OTP.',
@@ -1708,16 +1787,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : currentUser.position;
 
     const hashedPassword = profileData.password ? hashPasswordSync(profileData.password) : (currentUser.password || currentUser.password_hash);
+    const isSuper = currentUser.role === 'SUPER_ADMIN' || currentUser.id === 'user-super';
+
     const updatedUser: User = {
       ...currentUser,
       nama: resolvedName,
       name: resolvedName,
       position: resolvedPosition,
       status_peran_kerja: resolvedPosition,
+      username: isSuper && newEmail ? newEmail : currentUser.username,
       email: newEmail,
-      email_tertaut: isEmailChanged ? undefined : currentUser.email_tertaut,
-      is_email_verified: isEmailChanged ? false : currentUser.is_email_verified,
-      email_verified_at: isEmailChanged ? undefined : currentUser.email_verified_at,
+      email_tertaut: isSuper ? newEmail : (isEmailChanged ? undefined : currentUser.email_tertaut),
+      is_email_verified: isSuper ? true : (isEmailChanged ? false : currentUser.is_email_verified),
+      email_verified_at: isSuper ? new Date().toISOString() : (isEmailChanged ? undefined : currentUser.email_verified_at),
       nomor_telepon: profileData.nomor_telepon !== undefined ? profileData.nomor_telepon : currentUser.nomor_telepon,
       avatar: profileData.avatar !== undefined ? profileData.avatar : (profileData.foto_profil !== undefined ? profileData.foto_profil : currentUser.avatar),
       foto_profil: profileData.avatar !== undefined ? profileData.avatar : (profileData.foto_profil !== undefined ? profileData.foto_profil : currentUser.foto_profil || currentUser.avatar),
@@ -1728,8 +1810,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setCurrentUser(updatedUser);
     setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
+    try {
+      sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updatedUser));
+    } catch {}
+
+    // Instant real-time persist to MySQL database
+    try {
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedUser),
+      }).catch(() => {});
+    } catch {}
+
     logActivity('Perbarui Profil', `Memperbarui data profil: ${resolvedName} (${newEmail || '-'})`, 'USER');
-    showToast('Profil Diperbarui', isEmailChanged ? `Email berhasil diubah menjadi ${newEmail}. Silakan klik 'Kirim Kode OTP' jika ingin menautkannya.` : 'Data profil Anda telah berhasil disimpan.', 'success');
+    showToast('Profil Diperbarui', isEmailChanged ? `Email berhasil diubah menjadi ${newEmail}.` : 'Data profil Anda telah berhasil disimpan.', 'success');
     return { success: true };
   };
 
@@ -1743,6 +1838,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     trxType?: StockTransactionType
   ): boolean => {
     if (!currentUser) return false;
+    if (!ensureUserSessionValid()) return false;
     if (currentUser.role === 'KARYAWAN') {
       showToast('Akses Ditolak', 'Role Karyawan hanya memiliki hak untuk melihat riwayat stok, bukan melakukan mutasi atau penyesuaian stok langsung.', 'error');
       return false;
@@ -1938,6 +2034,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Inventory CRUD
   const addInventoryItem = (data: Omit<InventoryItem, 'id' | 'status' | 'created_at' | 'updated_at'>) => {
+    if (!ensureUserSessionValid()) return;
     if (currentUser?.role === 'KARYAWAN') {
       showToast('Akses Ditolak', 'Role Karyawan tidak memiliki hak untuk menambahkan master komponen baru.', 'error');
       return;
@@ -1992,6 +2089,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateInventoryItem = (id: string, data: Partial<InventoryItem>) => {
+    if (!ensureUserSessionValid()) return;
     if (currentUser?.role === 'KARYAWAN') {
       showToast('Akses Ditolak', 'Role Karyawan tidak memiliki hak untuk mengedit data master komponen.', 'error');
       return;
@@ -2014,6 +2112,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteInventoryItem = async (id: string) => {
+    if (!ensureUserSessionValid()) return;
     if (currentUser?.role === 'KARYAWAN') {
       showToast('Akses Ditolak', 'Role Karyawan tidak memiliki hak untuk menghapus data master komponen.', 'error');
       return;
@@ -2201,6 +2300,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Returns
   const createReturn = (inventoryId: string, amount: number, reason: string, notes: string): boolean => {
     if (!currentUser) return false;
+    if (!ensureUserSessionValid()) return false;
     const item = inventory.find((i) => i.id === inventoryId);
     if (!item) return false;
 
@@ -2269,6 +2369,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     reason: string
   ): boolean => {
     if (!currentUser) return false;
+    if (!ensureUserSessionValid()) return false;
     const item = inventory.find((i) => i.id === inventoryId);
     if (!item) return false;
 
@@ -2852,6 +2953,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setUsers((prev) => [...prev, newUser]);
+
+    // Instant real-time push to MySQL backend so newly created account is recognized immediately without refresh
+    try {
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newUser),
+      }).catch(() => {});
+    } catch {}
+
     logActivity(
       'Buat Akun Karyawan',
       `Mendaftarkan akun baru ${newUser.nama} (${newUser.role} - ${newUser.position}) di cabang ${newUser.store_id || 'Pusat'}`,
@@ -2912,11 +3023,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       finalData.position = p;
       finalData.status_peran_kerja = p;
     }
-    const updatedUsers = users.map((u) => (u.id === id ? { ...u, ...finalData } : u));
+    const updatedUserObj = { ...target, ...finalData };
+    const updatedUsers = users.map((u) => (u.id === id ? updatedUserObj : u));
     setUsers(updatedUsers);
     if (currentUser?.id === id) {
       setCurrentUser((prev) => (prev ? { ...prev, ...finalData } : prev));
     }
+
+    // Direct push to database
+    try {
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedUserObj),
+      }).catch(() => {});
+    } catch {}
+
     const { updated: reconciledAtt, hasChanges } = reconcileAttendanceRecords(attendance, updatedUsers, stores);
     if (hasChanges) {
       setAttendance(reconciledAtt);
@@ -2941,6 +3063,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setUsers((prev) => prev.filter((u) => u.id !== id));
+    if (currentUser?.id === id) {
+      forceLogoutInactiveUser('DELETED');
+    }
     logActivity('Hapus Pengguna Permanen', `Menghapus akun ${target.nama || target.name} (${target.email || target.username}) secara permanen`, 'USER', target.store_id);
     showToast('Akun Dihapus', `Akun ${target.nama || target.name} berhasil dihapus permanen.`, 'info');
     return { success: true, message: `Akun ${target.nama || target.name} berhasil dihapus permanen.` };
@@ -3360,8 +3485,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (Array.isArray(d.users) && d.users.length > 0) {
           setUsers(d.users);
           if (currentUser) {
-            const liveUser = d.users.find((u: any) => u.id === currentUser.id);
-            if (liveUser) {
+            if (currentUser.role !== 'SUPER_ADMIN') {
+              const liveUser = d.users.find((u: any) => u.id === currentUser.id);
+              if (!liveUser) {
+                forceLogoutInactiveUser('DELETED');
+                return true;
+              }
+              if (liveUser.status === 'NONAKTIF') {
+                forceLogoutInactiveUser('NONAKTIF');
+                return true;
+              }
               setCurrentUser((prev) => {
                 if (!prev) return null;
                 if (
@@ -3382,6 +3515,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 }
                 return prev;
               });
+            } else {
+              const liveSuper = d.users.find((u: any) => u.id === currentUser.id || u.role === 'SUPER_ADMIN');
+              if (liveSuper) {
+                setCurrentUser((prev) => {
+                  if (!prev) return null;
+                  if (liveSuper.email !== prev.email || liveSuper.nama !== prev.nama || liveSuper.avatar !== prev.avatar) {
+                    const updated = { ...prev, ...liveSuper };
+                    try {
+                      sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updated));
+                    } catch {}
+                    return updated;
+                  }
+                  return prev;
+                });
+              }
             }
           }
         }

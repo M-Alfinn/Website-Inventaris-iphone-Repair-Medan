@@ -51,6 +51,8 @@ function sanitizeUserData(data: any) {
           store_id: null,
           position: 'Super Administrator',
           status_peran_kerja: 'Super Administrator',
+          email: u.email || 'superadmin@gmail.com',
+          email_tertaut: u.email_tertaut || u.email || 'superadmin@gmail.com',
         };
       }
       return u;
@@ -64,8 +66,8 @@ function sanitizeUserData(data: any) {
         username: 'superadmin@gmail.com',
         nomor_telepon: '081234567890',
         no_hp: '081234567890',
-        email: 'mhdalfinml@gmail.com',
-        email_tertaut: 'mhdalfinml@gmail.com',
+        email: 'superadmin@gmail.com',
+        email_tertaut: 'superadmin@gmail.com',
         is_email_verified: 1,
         password_hash: 'sha256_01d37036f28a8d3663073d10',
         role: 'SUPER_ADMIN',
@@ -204,10 +206,7 @@ app.get('/api/data', async (_req, res) => {
 // Bulk sync endpoint to push data from frontend to MySQL or Local Storage
 app.post('/api/sync-all', async (req, res) => {
   try {
-    const { stores, users, categories, iphoneSeries, inventory, transactions, returns, attendance, activityLogs, notifications } = req.body;
-    
-    // Always persist to local backup file for safety
-    saveLocalBackup({
+    const {
       stores,
       users,
       categories,
@@ -218,9 +217,50 @@ app.post('/api/sync-all', async (req, res) => {
       attendance,
       activityLogs,
       notifications,
-    });
+      callerRole,
+      callerUserId,
+    } = req.body;
 
     const status = await checkDbConnection();
+
+    // Session validation: If caller is provided and not Super Admin, verify user still exists in DB
+    if (status.connected && callerUserId && callerUserId !== 'user-super') {
+      try {
+        const pool = getDbPool();
+        const [userCheck]: any = await pool.query('SELECT id, status FROM users WHERE id = ?', [callerUserId]);
+        if (!userCheck || userCheck.length === 0) {
+          return res.status(403).json({
+            success: false,
+            code: 'USER_DELETED',
+            message: 'Akun Anda telah dihapus oleh administrator. Sesi telah diakhiri.',
+          });
+        }
+        if (userCheck[0].status === 'NONAKTIF') {
+          return res.status(403).json({
+            success: false,
+            code: 'USER_DELETED',
+            message: 'Akun Anda telah dinonaktifkan oleh administrator. Sesi telah diakhiri.',
+          });
+        }
+      } catch (err: any) {
+        console.warn('[Sync-All Auth Check Error]:', err?.message);
+      }
+    }
+    
+    // Always persist to local backup file for safety (only sync users if super admin)
+    saveLocalBackup({
+      stores,
+      ...(callerRole === 'SUPER_ADMIN' && users ? { users } : {}),
+      categories,
+      iphoneSeries,
+      inventory,
+      transactions,
+      returns,
+      attendance,
+      activityLogs,
+      notifications,
+    });
+
     if (!status.connected) {
       return res.json({
         success: true,
@@ -277,7 +317,9 @@ app.post('/api/sync-all', async (req, res) => {
         }
       }
 
-      if (Array.isArray(users)) {
+      // Security Guard: Hanya SUPER_ADMIN yang berwenang menimpa/menyinkronkan tabel users!
+      // Mencegah akun yang sudah dihapus hidup kembali saat browser lain melakukan sinkronisasi otomatis.
+      if (Array.isArray(users) && callerRole === 'SUPER_ADMIN') {
         for (const u of users) {
           const isSuper = u.id === 'user-super' || u.role === 'SUPER_ADMIN';
           const resolvedRole = isSuper ? 'SUPER_ADMIN' : u.role;

@@ -46,18 +46,21 @@ export const LoginPage: React.FC = () => {
     }
   }, [resendCooldown]);
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setIsLoading(true);
 
-    setTimeout(() => {
+    try {
+      const res = await login(email, password);
       setIsLoading(false);
-      const res = login(email, password);
       if (!res.success) {
         setErrorMsg(res.message || 'Email atau kata sandi tidak sesuai. Silakan coba kembali.');
       }
-    }, 400);
+    } catch {
+      setIsLoading(false);
+      setErrorMsg('Gagal memproses login. Silakan coba sesaat lagi.');
+    }
   };
 
   // STEP 1: Send OTP to email
@@ -370,12 +373,12 @@ export const LoginPage: React.FC = () => {
             {/* ========================================================================= */}
             <div className="w-12 h-12 rounded-2xl bg-white shadow-md shadow-blue-500/10 border border-slate-100 flex items-center justify-center relative overflow-hidden shrink-0">
               <img
-                src="/images/logo.png"
+                src="/images/logo.svg"
                 alt="Logo iPhone Repair Medan"
                 className="w-full h-full object-contain scale-[1.25]"
                 onError={(e) => {
                   e.currentTarget.onerror = null;
-                  e.currentTarget.src = '/images/logo.svg';
+                  e.currentTarget.src = '/images/logo.png';
                 }}
               />
             </div>
@@ -457,12 +460,12 @@ export const LoginPage: React.FC = () => {
               <div className="inline-flex items-center justify-center gap-2.5 mb-1.5">
                 <div className="w-10 h-10 rounded-xl bg-white shadow-sm border border-slate-100 flex items-center justify-center overflow-hidden">
                   <img
-                    src="/images/logo.png"
+                    src="/images/logo.svg"
                     alt="Logo Toko"
                     className="w-full h-full object-contain scale-[1.25]"
                     onError={(e) => {
                       e.currentTarget.onerror = null;
-                      e.currentTarget.src = '/images/logo.svg';
+                      e.currentTarget.src = '/images/logo.png';
                     }}
                   />
                 </div>
