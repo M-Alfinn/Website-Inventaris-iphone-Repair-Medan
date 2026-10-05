@@ -224,12 +224,12 @@ export const Sidebar: React.FC = () => {
             {/* ========================================================================= */}
             <div className="w-10 h-10 bg-white text-slate-950 rounded-xl flex items-center justify-center font-bold shadow-sm shrink-0 overflow-hidden relative">
               <img
-                src="/images/logo.png"
+                src="/images/logo.svg"
                 alt="Logo Toko"
                 className="w-full h-full object-contain scale-[1.3] transition-transform"
                 onError={(e) => {
                   e.currentTarget.onerror = null;
-                  e.currentTarget.src = '/images/logo.svg';
+                  e.currentTarget.src = '/images/logo.png';
                 }}
               />
             </div>

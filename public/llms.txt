@@ -1,10 +1,17 @@
 # iPhone Repair Medan - Sistem Pengelolaan Inventaris
 
-> Sistem manajemen inventaris komponen smartphone dan sparepart iPhone multi-cabang, pencatatan stok, barang masuk/keluar/rusak, return, analisis laporan, dan absensi karyawan.
+> Sistem manajemen inventaris sparepart iPhone multi-cabang, pencatatan stok real-time, transaksi barang masuk/keluar/rusak, klaim return garansi, presensi absensi staf, dan integrasi audit log operasional.
 
-## Modul Utama
-- **Inventaris & Sparepart**: Pencatatan stok multi-cabang dengan status minimum buffer.
-- **Transaksi Barang**: Masuk, keluar, dan pencatatan barang rusak/cacat.
-- **Klaim Return**: Penanganan komplain pelanggan & garansi sparepart.
-- **Absensi & Presensi**: Jam masuk dan pulang karyawan berbasis peran kerja.
-- **Keamanan Akun**: Otentikasi OTP melalui Gmail dan perlindungan data multi-toko.
+## Dokumentasi & Navigasi Web
+
+- [Beranda & Portal Utama](https://iphonerepairmedan.web.id/): Antarmuka aplikasi web dan sistem pengelolaan inventaris.
+- [Sitemap XML](https://iphonerepairmedan.web.id/sitemap.xml): Peta navigasi situs dan indeks URL halaman aplikasi.
+- [Robots Directives](https://iphonerepairmedan.web.id/robots.txt): Aturan izin crawling dan direktif agen pencari.
+- [Katalog AI Agent](https://iphonerepairmedan.web.id/ai-catalog.json): Spesifikasi kapabilitas sistem dan arsitektur data.
+
+## Modul Sistem
+
+- [Inventaris Komponen](https://iphonerepairmedan.web.id/): Manajemen stok multi-cabang dengan peringatan minimum buffer.
+- [Barang Masuk & Keluar](https://iphonerepairmedan.web.id/): Pencatatan mutasi barang dan servis unit.
+- [Klaim Garansi & Return](https://iphonerepairmedan.web.id/): Penanganan klaim garansi toko dan supplier.
+- [Presensi Absensi Staf](https://iphonerepairmedan.web.id/): Pencatatan jam kehadiran dan jadwal shift cabang.

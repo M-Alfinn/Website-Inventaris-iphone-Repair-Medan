@@ -145,8 +145,8 @@ app.post('/api/db/test', async (_req, res) => {
   } catch (err: any) {
     return res.json({
       success: false,
-      message: 'Tidak dapat terhubung ke MySQL pada port 8111. Menggunakan penyimpanan lokal.',
-      status: { connected: false, host: 'localhost', port: 8111, error: err?.message },
+      message: 'Tidak dapat terhubung ke MySQL pada port 3306. Menggunakan penyimpanan lokal.',
+      status: { connected: false, host: 'localhost', port: 3306, error: err?.message },
     });
   }
 });
@@ -476,11 +476,12 @@ app.post('/api/sync-all', async (req, res) => {
 
       if (Array.isArray(notifications)) {
         for (const notif of notifications) {
+          const isRead = notif.read || notif.read_status === 1 || (Array.isArray(notif.read_by) && notif.read_by.includes('user-super'));
           await upsertRecord('notifications', {
             id: notif.id,
             store_id: notif.store_id || null,
             store_name: notif.store_name || '',
-            target_roles: notif.target_roles ? JSON.stringify(notif.target_roles) : null,
+            target_roles: notif.target_roles ? (typeof notif.target_roles === 'string' ? notif.target_roles : JSON.stringify(notif.target_roles)) : null,
             target_user_id: notif.target_user_id || null,
             creator_id: notif.creator_id || null,
             creator_name: notif.creator_name || null,
@@ -489,8 +490,8 @@ app.post('/api/sync-all', async (req, res) => {
             pesan: notif.pesan,
             tipe: notif.tipe || 'INFO',
             waktu: notif.waktu,
-            read_status: notif.read ? 1 : 0,
-            read_by: notif.read_by ? JSON.stringify(notif.read_by) : '[]',
+            read_status: isRead ? 1 : 0,
+            read_by: notif.read_by ? (typeof notif.read_by === 'string' ? notif.read_by : JSON.stringify(notif.read_by)) : '[]',
             link_page: notif.link_page || null,
             is_global: notif.is_global ? 1 : 0,
           });
@@ -1016,11 +1017,101 @@ app.post('/api/notifications', async (req, res) => {
     tipe: notif.tipe || 'INFO',
     waktu: notif.waktu,
     read_status: notif.read ? 1 : 0,
-    read_by: notif.read_by ? JSON.stringify(notif.read_by) : '[]',
+    read_by: notif.read_by ? (typeof notif.read_by === 'string' ? notif.read_by : JSON.stringify(notif.read_by)) : '[]',
     link_page: notif.link_page || null,
     is_global: notif.is_global ? 1 : 0,
   });
   res.json({ success: ok });
+});
+
+app.post('/api/notifications/mark-all-read', async (req, res) => {
+  try {
+    const { userId, role, visibleIds } = req.body;
+    const resolvedUserId = userId || 'user-super';
+
+    // 1. Update in-memory backup immediately for local dev & instant sync
+    if (inMemoryBackup?.notifications && Array.isArray(inMemoryBackup.notifications)) {
+      inMemoryBackup.notifications = inMemoryBackup.notifications.map((n: any) => {
+        if (!visibleIds || visibleIds.length === 0 || visibleIds.includes(n.id)) {
+          let readByList: string[] = [];
+          if (Array.isArray(n.read_by)) readByList = n.read_by;
+          else if (typeof n.read_by === 'string' && n.read_by.trim() !== '') {
+            try {
+              const p = JSON.parse(n.read_by);
+              if (Array.isArray(p)) readByList = p;
+            } catch {
+              readByList = n.read_by.split(',').map((s: string) => s.trim());
+            }
+          }
+          if (!readByList.includes(resolvedUserId)) readByList.push(resolvedUserId);
+          if (role === 'SUPER_ADMIN' && !readByList.includes('user-super')) readByList.push('user-super');
+
+          return {
+            ...n,
+            read: true,
+            read_status: 1,
+            read_by: readByList,
+          };
+        }
+        return n;
+      });
+    }
+
+    // 2. Persist to MySQL if connected
+    const status = await checkDbConnection();
+    if (status.connected) {
+      const pool = getDbPool();
+      const conn = await pool.getConnection();
+      try {
+        if (Array.isArray(visibleIds) && visibleIds.length > 0) {
+          const placeholders = visibleIds.map(() => '?').join(',');
+          await conn.query(`UPDATE notifications SET read_status = 1 WHERE id IN (${placeholders})`, visibleIds);
+        } else {
+          await conn.query('UPDATE notifications SET read_status = 1');
+        }
+      } finally {
+        conn.release();
+      }
+    }
+
+    res.json({ success: true, message: 'Semua notifikasi ditandai dibaca.' });
+  } catch (err: any) {
+    res.json({ success: true, message: err?.message });
+  }
+});
+
+app.post('/api/notifications/:id/read', async (req, res) => {
+  try {
+    const notifId = req.params.id;
+    const { userId } = req.body;
+    const resolvedUserId = userId || 'user-super';
+
+    if (inMemoryBackup?.notifications && Array.isArray(inMemoryBackup.notifications)) {
+      inMemoryBackup.notifications = inMemoryBackup.notifications.map((n: any) => {
+        if (n.id === notifId) {
+          let readByList: string[] = Array.isArray(n.read_by) ? n.read_by : [];
+          if (!readByList.includes(resolvedUserId)) readByList.push(resolvedUserId);
+          return { ...n, read: true, read_status: 1, read_by: readByList };
+        }
+        return n;
+      });
+    }
+
+    const status = await checkDbConnection();
+    if (status.connected) {
+      const pool = getDbPool();
+      const conn = await pool.getConnection();
+      try {
+        await conn.query('UPDATE notifications SET read_status = 1 WHERE id = ?', [notifId]);
+      } finally {
+        conn.release();
+      }
+    }
+
+    res.json({ success: true });
+  } catch {
+    res.json({ success: true });
+  }
 });
 
 // =========================================================================

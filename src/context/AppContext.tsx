@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import {
   User,
   Store,
@@ -41,6 +41,7 @@ import {
   isNotificationReadByUser,
   isNotificationVisibleForUser,
   filterNotificationsForUser,
+  normalizeNotification,
 } from '../utils/notificationRules';
 import { dispatchRealEmailOtp } from '../utils/emailService';
 import {
@@ -320,6 +321,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
 
+  const isRemoteSyncRef = useRef(false);
+
   const [activeStoreId, setActiveStoreId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
     try {
@@ -333,9 +336,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentPage, setCurrentPage] = useState<NavigationPage>(() => {
     if (typeof window === 'undefined') return 'DASHBOARD_TOKO';
     try {
+      const savedPage = sessionStorage.getItem('iphone_pos_active_page_v1') as NavigationPage | null;
       const sessionRaw = sessionStorage.getItem('iphone_pos_session_user_v1');
       if (sessionRaw) {
         const stored = JSON.parse(sessionRaw);
+        if (savedPage) {
+          if (stored?.role === 'KARYAWAN') {
+            const forbidden: NavigationPage[] = ['DASHBOARD_UTAMA', 'PILIH_TOKO', 'KARYAWAN', 'LAPORAN'];
+            if (!forbidden.includes(savedPage)) {
+              return savedPage;
+            }
+          } else if (stored?.role === 'ADMIN_TOKO') {
+            const forbidden: NavigationPage[] = ['DASHBOARD_UTAMA', 'PILIH_TOKO'];
+            if (!forbidden.includes(savedPage)) {
+              return savedPage;
+            }
+          } else if (stored?.role === 'SUPER_ADMIN') {
+            return savedPage;
+          }
+        }
         if (stored?.role === 'SUPER_ADMIN') return 'DASHBOARD_UTAMA';
       }
     } catch {}
@@ -562,6 +581,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auto-sync all data changes to MySQL backend automatically (real-time sync)
   useEffect(() => {
+    if (!currentUser) return; // Never auto-sync while user is not logged in / on login screen
+    if (isRemoteSyncRef.current) {
+      isRemoteSyncRef.current = false;
+      return; // Skip auto-sync because this state change was fetched from server
+    }
+
     const timer = setTimeout(async () => {
       try {
         const res = await fetch('/api/sync-all', {
@@ -580,11 +605,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             notifications,
           }),
         });
-        const resJson = await res.json();
-        if (resJson.success) {
-          const stRes = await fetch('/api/db/status');
-          const stJson = await stRes.json();
-          if (stJson.success && stJson.status) setDbStatus(stJson.status);
+        if (res.ok) {
+          const resJson = await res.json();
+          if (resJson.success) {
+            const stRes = await fetch('/api/db/status');
+            if (stRes.ok) {
+              const stJson = await stRes.json();
+              if (stJson.success && stJson.status) setDbStatus(stJson.status);
+            }
+          }
         }
       } catch {
         // Quiet fallback to local persistence
@@ -592,7 +621,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [stores, users, categories, iphoneSeries, inventory, transactions, returns, attendance, activityLogs, notifications]);
+  }, [currentUser, stores, users, categories, iphoneSeries, inventory, transactions, returns, attendance, activityLogs, notifications]);
 
   // Keep currentUser synchronized with latest changes in users collection
   useEffect(() => {
@@ -624,14 +653,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIsCheckingDb(true);
       try {
         const resStatus = await fetch('/api/db/status');
-        const statusJson = await resStatus.json();
-        if (statusJson.success && statusJson.status) {
-          setDbStatus(statusJson.status);
+        if (resStatus.ok) {
+          const statusJson = await resStatus.json();
+          if (statusJson.success && statusJson.status) {
+            setDbStatus(statusJson.status);
+          }
         }
 
         const resData = await fetch('/api/data');
-        const dataJson = await resData.json();
-        if (dataJson.success && dataJson.data) {
+        if (resData.ok) {
+          const dataJson = await resData.json();
+          if (dataJson.success && dataJson.data) {
           const d = dataJson.data;
           if (Array.isArray(d.stores)) setStores(d.stores);
           const firstStoreId = (d.stores && d.stores[0]?.id) || null;
@@ -669,9 +701,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             );
           }
           if (Array.isArray(d.activityLogs)) setActivityLogs(sanitizeActivityLogs(d.activityLogs));
-          if (Array.isArray(d.notifications)) setNotifications(sanitizeNotifications(d.notifications));
+          if (Array.isArray(d.notifications)) {
+            const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUser?.id));
+            setNotifications(sanitizeNotifications(normalized));
+          }
         }
-      } catch {
+      }
+    } catch {
         // Mode offline aktif, menggunakan data tersimpan di localStorage
       } finally {
         setIsCheckingDb(false);
@@ -680,6 +716,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     initDatabaseCheck();
   }, []);
+
+  // Cross-device real-time sync (HP <-> Laptop sync)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // 1. Silent background polling every 4 seconds to sync data across devices
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        fetchDataFromMySQL().catch(() => {});
+      }
+    }, 4000);
+
+    // 2. Fetch immediately when user focuses the tab or returns to the window
+    const handleFocus = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        fetchDataFromMySQL().catch(() => {});
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+    };
+  }, [currentUser]);
 
   const activeStore = useMemo(() => {
     if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
@@ -947,10 +1011,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (foundUser.role === 'SUPER_ADMIN') {
       setActiveStoreId(null);
       setCurrentPage('DASHBOARD_UTAMA');
+      try {
+        sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_UTAMA');
+      } catch {}
     } else {
       const assignedStoreId = foundUser.store_id || null;
       setActiveStoreId(assignedStoreId);
       setCurrentPage('DASHBOARD_TOKO');
+      try {
+        sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_TOKO');
+      } catch {}
     }
 
     if (foundUser.must_change_password) {
@@ -1477,6 +1547,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       sessionStorage.removeItem('iphone_pos_session_user_v1');
       sessionStorage.removeItem('iphone_pos_session_store_id_v1');
+      sessionStorage.removeItem('iphone_pos_active_page_v1');
       localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
       localStorage.removeItem(STORAGE_KEYS.ACTIVE_STORE_ID);
     } catch {}
@@ -1497,9 +1568,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (storeId === null) {
       setActiveStoreId(null);
       setCurrentPage('DASHBOARD_UTAMA');
+      try {
+        sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_UTAMA');
+      } catch {}
     } else {
       setActiveStoreId(storeId);
       setCurrentPage('DASHBOARD_TOKO');
+      try {
+        sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_TOKO');
+      } catch {}
     }
   };
 
@@ -1515,6 +1592,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (forbiddenForKaryawan.includes(page)) {
         showToast('Akses Ditolak', 'Akun Karyawan tidak memiliki hak akses ke halaman administratif ini.', 'error');
         setCurrentPage('DASHBOARD_TOKO');
+        try {
+          sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_TOKO');
+        } catch {}
         return;
       }
     } else if (currentUser?.role === 'ADMIN_TOKO') {
@@ -1525,6 +1605,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (forbiddenForAdminToko.includes(page)) {
         showToast('Akses Ditolak', 'Fitur ini khusus dikelola oleh Super Admin.', 'warning');
         setCurrentPage('DASHBOARD_TOKO');
+        try {
+          sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_TOKO');
+        } catch {}
         return;
       }
     }
@@ -1551,6 +1634,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setCurrentPage(page);
+    try {
+      sessionStorage.setItem('iphone_pos_active_page_v1', page);
+    } catch {}
+
+    // Instantly fetch latest server data when navigating between menus (e.g. from Dashboard to Log/Pengaturan)
+    fetchDataFromMySQL().catch(() => {});
   };
 
   const updateUserProfile = (profileData: {
@@ -3134,37 +3223,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const markNotificationAsRead = (id: string) => {
     if (!currentUser) return;
-    setNotifications((prev) =>
-      prev.map((n) => {
+    const isSuperAdmin = currentUser.role === 'SUPER_ADMIN' || currentUser.id === 'user-super';
+
+    setNotifications((prev) => {
+      const updated = prev.map((n) => {
         if (n.id === id) {
           const currentReadBy = Array.isArray(n.read_by) ? n.read_by : [];
-          if (currentReadBy.includes(currentUser.id)) return n;
+          const newReadBy = new Set(currentReadBy);
+          newReadBy.add(currentUser.id);
+          if (isSuperAdmin) newReadBy.add('user-super');
+
           return {
             ...n,
-            read_by: [...currentReadBy, currentUser.id],
+            read: true,
+            read_status: 1,
+            read_by: Array.from(newReadBy),
           };
         }
         return n;
-      })
-    );
+      });
+
+      try {
+        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    // Send immediate API request so backend & other devices recognize read status right away
+    fetch(`/api/notifications/${id}/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id, role: currentUser.role }),
+    }).catch(() => {});
   };
 
   const markAllNotificationsAsRead = () => {
     if (!currentUser) return;
+    const isSuperAdmin = currentUser.role === 'SUPER_ADMIN' || currentUser.id === 'user-super';
     const visibleIds = new Set(visibleNotifications.map((n) => n.id));
-    setNotifications((prev) =>
-      prev.map((n) => {
+    const visibleIdList = Array.from(visibleIds);
+
+    setNotifications((prev) => {
+      const updated = prev.map((n) => {
         if (visibleIds.has(n.id)) {
           const currentReadBy = Array.isArray(n.read_by) ? n.read_by : [];
-          if (currentReadBy.includes(currentUser.id)) return n;
+          const newReadBy = new Set(currentReadBy);
+          newReadBy.add(currentUser.id);
+          if (isSuperAdmin) newReadBy.add('user-super');
+
           return {
             ...n,
-            read_by: [...currentReadBy, currentUser.id],
+            read: true,
+            read_status: 1,
+            read_by: Array.from(newReadBy),
           };
         }
         return n;
-      })
-    );
+      });
+
+      try {
+        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    // Send instant API request to backend so subsequent polling from this or any other device sees them as read
+    fetch('/api/notifications/mark-all-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: currentUser.id,
+        role: currentUser.role,
+        visibleIds: visibleIdList,
+      }),
+    }).catch(() => {});
+
     showToast('Notifikasi', 'Semua notifikasi dalam lingkup saat ini telah ditandai dibaca.', 'info');
   };
 
@@ -3217,30 +3350,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const fetchDataFromMySQL = async (): Promise<boolean> => {
     try {
       const res = await fetch('/api/data');
+      if (!res.ok) return false;
       const json = await res.json();
       if (json.success && json.data) {
+        isRemoteSyncRef.current = true;
         const d = json.data;
         if (Array.isArray(d.stores) && d.stores.length > 0) setStores(d.stores);
         const firstStoreId = (d.stores && d.stores[0]?.id) || (stores.length > 0 ? stores[0].id : null);
-        if (Array.isArray(d.users) && d.users.length > 0) setUsers(d.users);
-        if (Array.isArray(d.categories) && d.categories.length > 0) {
+        if (Array.isArray(d.users) && d.users.length > 0) {
+          setUsers(d.users);
+          if (currentUser) {
+            const liveUser = d.users.find((u: any) => u.id === currentUser.id);
+            if (liveUser) {
+              setCurrentUser((prev) => {
+                if (!prev) return null;
+                if (
+                  liveUser.email !== prev.email ||
+                  liveUser.nama !== prev.nama ||
+                  liveUser.name !== prev.name ||
+                  liveUser.position !== prev.position ||
+                  liveUser.status_peran_kerja !== prev.status_peran_kerja ||
+                  liveUser.avatar !== prev.avatar ||
+                  liveUser.foto_profil !== prev.foto_profil ||
+                  liveUser.nomor_telepon !== prev.nomor_telepon
+                ) {
+                  const updated = { ...prev, ...liveUser };
+                  try {
+                    sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updated));
+                  } catch {}
+                  return updated;
+                }
+                return prev;
+              });
+            }
+          }
+        }
+        if (Array.isArray(d.categories)) {
           setCategories(d.categories.map((c: any) => ({
             ...c,
             store_id: c.store_id || firstStoreId,
           })));
         }
-        if (Array.isArray(d.iphoneSeries) && d.iphoneSeries.length > 0) {
+        if (Array.isArray(d.iphoneSeries)) {
           setIphoneSeries(d.iphoneSeries.map((s: any) => ({
             ...s,
             store_id: s.store_id || firstStoreId,
           })));
         }
-        if (Array.isArray(d.inventory) && d.inventory.length > 0) setInventory(d.inventory);
+        if (Array.isArray(d.inventory)) setInventory(d.inventory);
         if (Array.isArray(d.transactions)) setTransactions(d.transactions);
         if (Array.isArray(d.returns)) setReturns(d.returns);
         if (Array.isArray(d.attendance)) setAttendance(d.attendance);
-        if (Array.isArray(d.activityLogs)) setActivityLogs(d.activityLogs);
-        if (Array.isArray(d.notifications)) setNotifications(d.notifications);
+        if (Array.isArray(d.activityLogs)) {
+          setActivityLogs(sanitizeActivityLogs(d.activityLogs));
+          try {
+            localStorage.setItem(STORAGE_KEYS.ACTIVITY_LOGS, JSON.stringify(sanitizeActivityLogs(d.activityLogs)));
+          } catch {}
+        }
+        if (Array.isArray(d.notifications)) {
+          const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUser?.id));
+          setNotifications(sanitizeNotifications(normalized));
+          try {
+            localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(sanitizeNotifications(normalized)));
+          } catch {}
+        }
         return true;
       }
       return false;

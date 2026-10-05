@@ -2,6 +2,58 @@ import { AppNotification, User, UserRole, NavigationPage } from '../types';
 import { isEssentialNotification } from './activityLogRules';
 
 /**
+ * Memastikan properti notifikasi konsisten dan array read_by terurai dengan benar
+ * terlepas apakah data berasal dari MySQL (JSON string), LocalStorage, atau in-memory state.
+ */
+export const normalizeNotification = (
+  notif: any,
+  currentUserId?: string | null
+): AppNotification => {
+  if (!notif) return notif;
+
+  let readByList: string[] = [];
+  if (Array.isArray(notif.read_by)) {
+    readByList = notif.read_by;
+  } else if (typeof notif.read_by === 'string' && notif.read_by.trim() !== '') {
+    try {
+      const parsed = JSON.parse(notif.read_by);
+      if (Array.isArray(parsed)) {
+        readByList = parsed;
+      } else {
+        readByList = [String(parsed)];
+      }
+    } catch {
+      readByList = notif.read_by.split(',').map((s: string) => s.trim().replace(/^["']|["']$/g, ''));
+    }
+  }
+
+  let targetRolesList: UserRole[] | undefined = undefined;
+  if (Array.isArray(notif.target_roles)) {
+    targetRolesList = notif.target_roles;
+  } else if (typeof notif.target_roles === 'string' && notif.target_roles.trim() !== '') {
+    try {
+      const parsed = JSON.parse(notif.target_roles);
+      if (Array.isArray(parsed)) targetRolesList = parsed;
+    } catch {}
+  }
+
+  const isMarkedRead =
+    notif.read === true ||
+    notif.read_status === 1 ||
+    notif.read_status === '1' ||
+    readByList.includes('user-super') ||
+    (currentUserId ? readByList.includes(currentUserId) : false);
+
+  return {
+    ...notif,
+    read: !!isMarkedRead,
+    read_status: isMarkedRead ? 1 : 0,
+    read_by: readByList,
+    target_roles: targetRolesList,
+  };
+};
+
+/**
  * Memeriksa apakah suatu notifikasi sudah dibaca oleh pengguna tertentu.
  * Status dibaca bersifat independen per individu (hak masing-masing user),
  * disimpan dalam array `read_by` berisi user ID yang telah membacanya.
@@ -13,8 +65,33 @@ export const isNotificationReadByUser = (
   if (!notif) return true;
   if (!userId) return false;
   
-  const readBy = Array.isArray(notif.read_by) ? notif.read_by : [];
-  return readBy.includes(userId);
+  // 1. Langsung dibaca jika flag boolean read atau read_status bernilai aktif
+  if (notif.read === true || (notif as any).read_status === 1 || (notif as any).read_status === '1') {
+    return true;
+  }
+
+  // 2. Baca daftar read_by (mendukung Array asli maupun string JSON dari MySQL)
+  let readBy: string[] = [];
+  const rawReadBy = (notif as any).read_by;
+  if (Array.isArray(rawReadBy)) {
+    readBy = rawReadBy;
+  } else if (typeof rawReadBy === 'string' && rawReadBy.trim() !== '') {
+    try {
+      const parsed = JSON.parse(rawReadBy);
+      if (Array.isArray(parsed)) {
+        readBy = parsed;
+      } else {
+        readBy = [String(parsed)];
+      }
+    } catch {
+      readBy = rawReadBy.split(',').map((s: string) => s.trim().replace(/^["']|["']$/g, ''));
+    }
+  }
+
+  if (readBy.includes(userId)) return true;
+  if (userId === 'user-super' && (readBy.includes('user-super') || readBy.includes('SUPER_ADMIN'))) return true;
+
+  return false;
 };
 
 /**

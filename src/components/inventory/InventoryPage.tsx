@@ -59,23 +59,16 @@ export const InventoryPage: React.FC = () => {
   const [categoryFilter, setCategoryFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
 
-  // Automatically scroll back to top whenever selecting an iPhone series or switching views
+  // Scroll to top only when entering or exiting a series drill-down, preserving position on viewMode switch
   useEffect(() => {
-    const scrollToTop = () => {
+    if (selectedSeries) {
       const mainEl = document.querySelector('main');
       if (mainEl) {
         mainEl.scrollTop = 0;
-        mainEl.scrollTo({ top: 0, left: 0, behavior: 'instant' });
       }
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-      document.documentElement.scrollTop = 0;
-      document.body.scrollTop = 0;
-    };
-
-    scrollToTop();
-    const rafId = requestAnimationFrame(scrollToTop);
-    return () => cancelAnimationFrame(rafId);
-  }, [selectedSeries, viewMode]);
+    }
+  }, [selectedSeries]);
 
   // Modals
   const [isSeriesModalOpen, setIsSeriesModalOpen] = useState(false);
@@ -502,15 +495,23 @@ export const InventoryPage: React.FC = () => {
             {/* View Switcher */}
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setViewMode('SERIES_LIST')}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white shadow-xs"
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  setViewMode('SERIES_LIST');
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white shadow-xs cursor-pointer"
               >
                 <Grid className="w-3.5 h-3.5" />
                 <span>Katalog Seri</span>
               </button>
               <button
-                onClick={() => setViewMode('ALL_TABLE')}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 border border-slate-200"
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  setViewMode('ALL_TABLE');
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 border border-slate-200 cursor-pointer"
               >
                 <TableIcon className="w-3.5 h-3.5" />
                 <span>Semua Komponen (Tabel)</span>
@@ -1001,7 +1002,11 @@ export const InventoryPage: React.FC = () => {
               </div>
 
               <button
-                onClick={() => setViewMode('SERIES_LIST')}
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  setViewMode('SERIES_LIST');
+                }}
                 className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 border border-slate-200 shrink-0 cursor-pointer"
               >
                 <Grid className="w-3.5 h-3.5" />

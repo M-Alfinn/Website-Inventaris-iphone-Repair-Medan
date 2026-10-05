@@ -1,10 +1,12 @@
 import React, { useRef, useEffect, lazy, Suspense } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
-import { LoginPage } from './components/auth/LoginPage';
-import { Header } from './components/common/Header';
-import { Sidebar } from './components/common/Sidebar';
 import { ToastContainer } from './components/common/Toast';
-import { FirstLoginPasswordModal } from './components/auth/FirstLoginPasswordModal';
+
+// Lazy-load Login Page and authenticated shell components to minimize initial chunk size
+const LoginPage = lazy(() => import('./components/auth/LoginPage').then((m) => ({ default: m.LoginPage })));
+const Header = lazy(() => import('./components/common/Header').then((m) => ({ default: m.Header })));
+const Sidebar = lazy(() => import('./components/common/Sidebar').then((m) => ({ default: m.Sidebar })));
+const FirstLoginPasswordModal = lazy(() => import('./components/auth/FirstLoginPasswordModal').then((m) => ({ default: m.FirstLoginPasswordModal })));
 
 // Code-split authenticated dashboard subpages for high-performance mobile initial load
 const MainDashboard = lazy(() => import('./components/dashboard/MainDashboard').then((m) => ({ default: m.MainDashboard })));
@@ -49,7 +51,9 @@ const AppContent: React.FC = () => {
   if (!currentUser) {
     return (
       <main className="min-h-screen font-sans">
-        <LoginPage />
+        <Suspense fallback={<div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="w-8 h-8 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin" /></div>}>
+          <LoginPage />
+        </Suspense>
         <ToastContainer />
       </main>
     );
@@ -96,11 +100,15 @@ const AppContent: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-100/60 font-sans text-slate-900 flex flex-col">
       {/* Top Header */}
-      <Header />
+      <Suspense fallback={<div className="h-16 bg-white border-b border-slate-200" />}>
+        <Header />
+      </Suspense>
 
       <div className="flex-1 flex overflow-hidden">
         {/* Sidebar Navigation */}
-        <Sidebar />
+        <Suspense fallback={null}>
+          <Sidebar />
+        </Suspense>
 
         {/* Main Content Area */}
         <main
@@ -122,7 +130,9 @@ const AppContent: React.FC = () => {
       </div>
 
       {/* Global Toast Notifications & Mandatory Password Change Modal */}
-      <FirstLoginPasswordModal />
+      <Suspense fallback={null}>
+        <FirstLoginPasswordModal />
+      </Suspense>
       <ToastContainer />
     </div>
   );

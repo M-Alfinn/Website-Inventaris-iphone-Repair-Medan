@@ -21,7 +21,7 @@ export interface DbStatus {
 export function getDbConfig() {
   return {
     host: process.env.DB_HOST || '127.0.0.1',
-    port: parseInt(process.env.DB_PORT || '8111', 10),
+    port: parseInt(process.env.DB_PORT || '3306', 10),
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'iphone_repair_medan',
@@ -40,7 +40,7 @@ let lastCheckTimestamp = 0;
 let currentStatus: DbStatus = {
   connected: false,
   host: process.env.DB_HOST || '127.0.0.1',
-  port: parseInt(process.env.DB_PORT || '8111', 10),
+  port: parseInt(process.env.DB_PORT || '3306', 10),
   database: process.env.DB_NAME || 'iphone_repair_medan',
   user: process.env.DB_USER || 'root',
   error: 'Belum diuji',
@@ -222,7 +222,43 @@ export async function fetchAllDataFromMySQL(): Promise<any | null> {
         WHERE NOT (role = 'KARYAWAN' AND (tipe NOT IN ('ABSENSI', 'AUTH', 'USER') OR aktivitas LIKE '%perbaikan%' OR detail_perubahan LIKE '%perbaikan%'))
         ORDER BY waktu DESC, id DESC LIMIT 500
       `);
-      const [notifications] = await conn.query('SELECT * FROM notifications ORDER BY created_at DESC, id DESC LIMIT 200');
+      const [notificationsRaw]: any = await conn.query('SELECT * FROM notifications ORDER BY created_at DESC, id DESC LIMIT 200');
+      const notifications = Array.isArray(notificationsRaw)
+        ? notificationsRaw.map((n: any) => {
+            let readByList: string[] = [];
+            if (Array.isArray(n.read_by)) {
+              readByList = n.read_by;
+            } else if (typeof n.read_by === 'string' && n.read_by.trim() !== '') {
+              try {
+                const parsed = JSON.parse(n.read_by);
+                if (Array.isArray(parsed)) readByList = parsed;
+                else readByList = [String(parsed)];
+              } catch {
+                readByList = n.read_by.split(',').map((s: string) => s.trim());
+              }
+            }
+
+            let targetRolesList: string[] | null = null;
+            if (Array.isArray(n.target_roles)) {
+              targetRolesList = n.target_roles;
+            } else if (typeof n.target_roles === 'string' && n.target_roles.trim() !== '') {
+              try {
+                const parsed = JSON.parse(n.target_roles);
+                if (Array.isArray(parsed)) targetRolesList = parsed;
+              } catch {}
+            }
+
+            const isRead = n.read_status === 1 || n.read === true || n.read === 1 || readByList.includes('user-super');
+
+            return {
+              ...n,
+              read: isRead,
+              read_status: isRead ? 1 : 0,
+              read_by: readByList,
+              target_roles: targetRolesList,
+            };
+          })
+        : [];
 
       return {
         stores,

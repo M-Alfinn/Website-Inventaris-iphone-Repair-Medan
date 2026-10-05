@@ -96,8 +96,14 @@ export default defineConfig(() => {
         ignored: ['**/*.json', '**/*.sql', '**/.env*'],
       },
     },
+    esbuild: {
+      drop: ['console', 'debugger'],
+      legalComments: 'none',
+    },
     build: {
       target: 'esnext',
+      minify: 'esbuild',
+      cssMinify: true,
       chunkSizeWarningLimit: 600,
       rollupOptions: {
         output: {
