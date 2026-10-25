@@ -373,7 +373,7 @@ export const LoginPage: React.FC = () => {
             {/* ========================================================================= */}
             <div className="w-12 h-12 rounded-2xl bg-white shadow-md shadow-blue-500/10 border border-slate-100 flex items-center justify-center relative overflow-hidden shrink-0">
               <img
-                src="/images/logo.svg"
+                src="/images/logo.png"
                 alt="Logo iPhone Repair Medan"
                 className="w-full h-full object-contain scale-[1.25]"
                 onError={(e) => {
