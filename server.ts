@@ -43,10 +43,18 @@ function sanitizeUserData(data: any) {
   if (data && Array.isArray(data.users)) {
     let hasSuper = false;
     data.users = data.users.map((u: any) => {
+      const resolvedHash = u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10';
+      const mustChange = u.must_change_password === 1 || u.must_change_password === true || u.must_change_password === '1';
+      const emailVerified = u.is_email_verified === 1 || u.is_email_verified === true || u.is_email_verified === '1';
+
       if (u.id === 'user-super' || u.role === 'SUPER_ADMIN') {
         hasSuper = true;
         return {
           ...u,
+          password: resolvedHash,
+          password_hash: resolvedHash,
+          must_change_password: mustChange,
+          is_email_verified: emailVerified,
           role: 'SUPER_ADMIN',
           store_id: null,
           position: 'Super Administrator',
@@ -55,7 +63,13 @@ function sanitizeUserData(data: any) {
           email_tertaut: u.email_tertaut || u.email || 'superadmin@gmail.com',
         };
       }
-      return u;
+      return {
+        ...u,
+        password: resolvedHash,
+        password_hash: resolvedHash,
+        must_change_password: mustChange,
+        is_email_verified: emailVerified,
+      };
     });
 
     if (!hasSuper) {
@@ -68,7 +82,8 @@ function sanitizeUserData(data: any) {
         no_hp: '081234567890',
         email: 'superadmin@gmail.com',
         email_tertaut: 'superadmin@gmail.com',
-        is_email_verified: 1,
+        is_email_verified: true,
+        password: 'sha256_01d37036f28a8d3663073d10',
         password_hash: 'sha256_01d37036f28a8d3663073d10',
         role: 'SUPER_ADMIN',
         store_id: null,
@@ -77,7 +92,7 @@ function sanitizeUserData(data: any) {
         status_peran_kerja: 'Super Administrator',
         avatar: '',
         foto_profil: '',
-        must_change_password: 0,
+        must_change_password: false,
         jam_masuk_standar: '08:30',
         jam_pulang_standar: '17:00',
         toleransi_keterlambatan_menit: 0,
@@ -91,6 +106,24 @@ function sanitizeUserData(data: any) {
 function saveLocalBackup(data: any) {
   try {
     const sanitized = sanitizeUserData(data);
+    if (sanitized?.users && Array.isArray(inMemoryBackup?.users)) {
+      const existingMap = new Map<string, any>(
+        inMemoryBackup.users.map((u: any) => [u.id, u])
+      );
+      sanitized.users = sanitized.users.map((u: any) => {
+        const existing = existingMap.get(u.id);
+        // Prevent background bulk sync from reverting a user whose password was already changed via /api/users
+        if (existing && !existing.must_change_password && u.must_change_password) {
+          return {
+            ...u,
+            password: existing.password_hash || existing.password,
+            password_hash: existing.password_hash || existing.password,
+            must_change_password: false,
+          };
+        }
+        return u;
+      });
+    }
     inMemoryBackup = { ...(inMemoryBackup || {}), ...sanitized, _lastUpdated: new Date().toISOString() };
   } catch {
     // quiet
@@ -318,24 +351,42 @@ app.post('/api/sync-all', async (req, res) => {
       }
 
       // Security Guard: Hanya SUPER_ADMIN yang berwenang menimpa/menyinkronkan tabel users!
-      // Mencegah akun yang sudah dihapus hidup kembali saat browser lain melakukan sinkronisasi otomatis.
+      // Mencegah akun yang sudah dihapus hidup kembali saat browser lain melakukan sinkronisasi otomatis,
+      // serta mencegah password yang sudah diganti pengguna tertimpa kembali oleh state lama.
       if (Array.isArray(users) && callerRole === 'SUPER_ADMIN') {
+        const [existingDbUsers]: any = await conn.query('SELECT id, password_hash, must_change_password FROM users');
+        const existingDbMap = new Map<string, any>(
+          Array.isArray(existingDbUsers) ? existingDbUsers.map((row: any) => [row.id, row]) : []
+        );
+
         for (const u of users) {
           const isSuper = u.id === 'user-super' || u.role === 'SUPER_ADMIN';
           const resolvedRole = isSuper ? 'SUPER_ADMIN' : u.role;
           const resolvedStoreId = isSuper ? null : (u.store_id || null);
           const resolvedPosition = isSuper ? 'Super Administrator' : (u.position || u.status_peran_kerja || '');
+          const dbUser = existingDbMap.get(u.id);
+
+          let finalPasswordHash = u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10';
+          let finalMustChange = u.must_change_password ? 1 : 0;
+
+          // Jika di database MySQL pengguna sudah mengganti password awal (must_change_password === 0),
+          // jangan biarkan bulk sync menimpanya kembali menjadi must_change_password = 1
+          if (dbUser && Number(dbUser.must_change_password) === 0 && finalMustChange === 1) {
+            finalPasswordHash = dbUser.password_hash || finalPasswordHash;
+            finalMustChange = 0;
+          }
+
           await upsertRecord('users', {
             id: u.id,
             nama: u.nama || u.name,
             name: u.name || u.nama,
-            username: u.username || u.email,
+            username: u.username || u.email || u.id,
             nomor_telepon: u.nomor_telepon || u.no_hp || '',
             no_hp: u.no_hp || u.nomor_telepon || '',
             email: u.email || null,
             email_tertaut: u.email_tertaut || null,
             is_email_verified: u.is_email_verified ? 1 : 0,
-            password_hash: u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10',
+            password_hash: finalPasswordHash,
             role: resolvedRole,
             store_id: resolvedStoreId,
             status: isSuper ? 'AKTIF' : (u.status || 'AKTIF'),
@@ -343,7 +394,7 @@ app.post('/api/sync-all', async (req, res) => {
             status_peran_kerja: resolvedPosition,
             avatar: u.avatar || u.foto_profil || null,
             foto_profil: u.foto_profil || u.avatar || null,
-            must_change_password: u.must_change_password ? 1 : 0,
+            must_change_password: finalMustChange,
             jam_masuk_standar: u.jam_masuk_standar || '08:30',
             jam_pulang_standar: u.jam_pulang_standar || '17:00',
             toleransi_keterlambatan_menit: u.toleransi_keterlambatan_menit || 0,
@@ -872,30 +923,85 @@ app.delete('/api/stores/:id', async (req, res) => {
 // Users
 app.post('/api/users', async (req, res) => {
   const u = req.body;
-  const ok = await upsertRecord('users', {
+  if (!u || !u.id) {
+    return res.status(400).json({ success: false, message: 'Data pengguna tidak valid.' });
+  }
+
+  const isSuper = u.id === 'user-super' || u.role === 'SUPER_ADMIN';
+  const resolvedRole = isSuper ? 'SUPER_ADMIN' : u.role;
+  const resolvedStoreId = isSuper ? null : (u.store_id || null);
+  const resolvedPosition = isSuper ? 'Super Administrator' : (u.position || u.status_peran_kerja || '');
+  const resolvedHash = u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10';
+  const mustChangeBool = u.must_change_password === 1 || u.must_change_password === true || u.must_change_password === '1';
+  const emailVerifiedBool = u.is_email_verified === 1 || u.is_email_verified === true || u.is_email_verified === '1';
+
+  const normalizedForMemory = {
+    ...u,
     id: u.id,
     nama: u.nama || u.name,
     name: u.name || u.nama,
-    username: u.username || u.email,
+    username: u.username || u.email || u.id,
     nomor_telepon: u.nomor_telepon || u.no_hp || '',
     no_hp: u.no_hp || u.nomor_telepon || '',
     email: u.email || null,
     email_tertaut: u.email_tertaut || null,
-    is_email_verified: u.is_email_verified ? 1 : 0,
-    password_hash: u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10',
-    role: u.role,
-    store_id: u.store_id || null,
-    status: u.status || 'AKTIF',
-    position: u.position || u.status_peran_kerja || '',
-    status_peran_kerja: u.status_peran_kerja || u.position || '',
+    is_email_verified: emailVerifiedBool,
+    password: resolvedHash,
+    password_hash: resolvedHash,
+    role: resolvedRole,
+    store_id: resolvedStoreId,
+    status: isSuper ? 'AKTIF' : (u.status || 'AKTIF'),
+    position: resolvedPosition,
+    status_peran_kerja: resolvedPosition,
     avatar: u.avatar || u.foto_profil || null,
     foto_profil: u.foto_profil || u.avatar || null,
-    must_change_password: u.must_change_password ? 1 : 0,
+    must_change_password: mustChangeBool,
     jam_masuk_standar: u.jam_masuk_standar || '08:30',
     jam_pulang_standar: u.jam_pulang_standar || '17:00',
     toleransi_keterlambatan_menit: u.toleransi_keterlambatan_menit || 0,
+  };
+
+  // Always update inMemoryBackup immediately so local fallback & concurrent reads see the new password/status right away
+  try {
+    if (!inMemoryBackup) {
+      inMemoryBackup = { users: [normalizedForMemory], _lastUpdated: new Date().toISOString() };
+    } else if (Array.isArray(inMemoryBackup.users)) {
+      const idx = inMemoryBackup.users.findIndex((item: any) => item.id === u.id);
+      if (idx >= 0) {
+        inMemoryBackup.users[idx] = normalizedForMemory;
+      } else {
+        inMemoryBackup.users.push(normalizedForMemory);
+      }
+      inMemoryBackup._lastUpdated = new Date().toISOString();
+    } else {
+      inMemoryBackup.users = [normalizedForMemory];
+    }
+  } catch {}
+
+  const ok = await upsertRecord('users', {
+    id: normalizedForMemory.id,
+    nama: normalizedForMemory.nama,
+    name: normalizedForMemory.name,
+    username: normalizedForMemory.username,
+    nomor_telepon: normalizedForMemory.nomor_telepon,
+    no_hp: normalizedForMemory.no_hp,
+    email: normalizedForMemory.email,
+    email_tertaut: normalizedForMemory.email_tertaut,
+    is_email_verified: emailVerifiedBool ? 1 : 0,
+    password_hash: resolvedHash,
+    role: normalizedForMemory.role,
+    store_id: normalizedForMemory.store_id,
+    status: normalizedForMemory.status,
+    position: normalizedForMemory.position,
+    status_peran_kerja: normalizedForMemory.status_peran_kerja,
+    avatar: normalizedForMemory.avatar,
+    foto_profil: normalizedForMemory.foto_profil,
+    must_change_password: mustChangeBool ? 1 : 0,
+    jam_masuk_standar: normalizedForMemory.jam_masuk_standar,
+    jam_pulang_standar: normalizedForMemory.jam_pulang_standar,
+    toleransi_keterlambatan_menit: normalizedForMemory.toleransi_keterlambatan_menit,
   });
-  res.json({ success: ok });
+  res.json({ success: ok, user: normalizedForMemory });
 });
 
 app.delete('/api/users/:id', async (req, res) => {

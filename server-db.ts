@@ -193,7 +193,19 @@ export async function fetchAllDataFromMySQL(): Promise<any | null> {
     const conn = await currentPool.getConnection();
     try {
       const [stores] = await conn.query('SELECT * FROM stores ORDER BY id ASC');
-      const [users] = await conn.query('SELECT * FROM users ORDER BY role ASC, id ASC');
+      const [usersRaw]: any = await conn.query('SELECT * FROM users ORDER BY role ASC, id ASC');
+      const users = Array.isArray(usersRaw)
+        ? usersRaw.map((u: any) => {
+            const resolvedHash = u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10';
+            return {
+              ...u,
+              password: resolvedHash,
+              password_hash: resolvedHash,
+              must_change_password: u.must_change_password === 1 || u.must_change_password === true || u.must_change_password === '1',
+              is_email_verified: u.is_email_verified === 1 || u.is_email_verified === true || u.is_email_verified === '1',
+            };
+          })
+        : [];
       const [categories] = await conn.query('SELECT * FROM categories ORDER BY id ASC');
       const [iphoneSeries] = await conn.query('SELECT * FROM iphone_series ORDER BY urutan ASC, id ASC');
       const [inventory] = await conn.query('SELECT * FROM inventory ORDER BY store_id ASC, category_id ASC, kode_barang ASC');

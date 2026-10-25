@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Lock, ShieldAlert, CheckCircle2, Eye, EyeOff, KeyRound } from 'lucide-react';
 
@@ -9,7 +9,13 @@ export const FirstLoginPasswordModal: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  if (!isFirstLoginModalOpen || !currentUser) return null;
+  useEffect(() => {
+    setNewPassword('');
+    setConfirmPassword('');
+    setErrorMsg('');
+  }, [currentUser?.id, isFirstLoginModalOpen]);
+
+  if (!isFirstLoginModalOpen || !currentUser || !Boolean(currentUser.must_change_password)) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

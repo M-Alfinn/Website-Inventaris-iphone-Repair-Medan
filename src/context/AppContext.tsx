@@ -297,6 +297,32 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+function normalizeUserRecord(u: any): User {
+  const isSuper = u.id === 'user-super' || u.role === 'SUPER_ADMIN';
+  const resolvedHash = u.password_hash || u.password || 'sha256_01d37036f28a8d3663073d10';
+  const mustChange = u.must_change_password === true || u.must_change_password === 1 || u.must_change_password === '1';
+  const emailVerified = u.is_email_verified === true || u.is_email_verified === 1 || u.is_email_verified === '1';
+  const cleanName = (u.nama || u.name || '').replace(/\s*\((\s*|0)\)/g, '').replace(/\s+0$/, '').trim() || (isSuper ? 'Super Admin' : 'Pengguna');
+  const resolvedPosition = isSuper
+    ? 'Super Administrator'
+    : (u.position || u.status_peran_kerja || (u.role === 'ADMIN_TOKO' ? 'Kepala Toko' : 'Staf / Teknisi'));
+
+  return {
+    ...u,
+    id: u.id,
+    nama: cleanName,
+    name: cleanName,
+    role: (isSuper ? 'SUPER_ADMIN' : u.role) as UserRole,
+    store_id: isSuper ? null : (u.store_id || null),
+    position: resolvedPosition,
+    status_peran_kerja: resolvedPosition,
+    password: resolvedHash,
+    password_hash: resolvedHash,
+    must_change_password: mustChange,
+    is_email_verified: emailVerified,
+  };
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Session starts from sessionStorage within the active tab, ensuring fresh visits & preview start at Login Page
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -305,23 +331,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const sessionRaw = sessionStorage.getItem('iphone_pos_session_user_v1');
       if (!sessionRaw) return null;
       const stored = JSON.parse(sessionRaw);
-      if (!stored) return null;
-      if (stored.id === 'user-super' || stored.role === 'SUPER_ADMIN') {
-        return {
-          ...stored,
-          role: 'SUPER_ADMIN',
-          store_id: null,
-          position: 'Super Administrator',
-          status_peran_kerja: 'Super Administrator',
-        };
-      }
-      return stored;
+      if (!stored || !stored.id) return null;
+      return normalizeUserRecord(stored);
     } catch {
       return null;
     }
   });
 
+  const currentUserRef = useRef<User | null>(currentUser);
+  currentUserRef.current = currentUser;
+
   const isRemoteSyncRef = useRef(false);
+  const isInitialLoadCompleteRef = useRef(false);
+  const recentlyModifiedUsersRef = useRef<Record<string, { user: User; timestamp: number }>>({});
+
+  const mergeServerUsersWithLocalPending = (serverUsers: any[]): User[] => {
+    const now = Date.now();
+    return serverUsers.map((rawUser: any) => {
+      const normalized = normalizeUserRecord(rawUser);
+      const pending = recentlyModifiedUsersRef.current[normalized.id];
+      if (pending && now - pending.timestamp < 10000) {
+        return normalizeUserRecord({
+          ...normalized,
+          ...pending.user,
+          password: pending.user.password_hash || pending.user.password,
+          password_hash: pending.user.password_hash || pending.user.password,
+          must_change_password: Boolean(pending.user.must_change_password),
+        });
+      }
+      return normalized;
+    });
+  };
+
+  const persistUserToBackend = (userObj: User) => {
+    const normalized = normalizeUserRecord(userObj);
+    recentlyModifiedUsersRef.current[normalized.id] = {
+      user: normalized,
+      timestamp: Date.now(),
+    };
+
+    try {
+      if (currentUserRef.current && currentUserRef.current.id === normalized.id) {
+        currentUserRef.current = normalized;
+        sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(normalized));
+      }
+    } catch {}
+
+    try {
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(normalized),
+      }).catch(() => {});
+    } catch {}
+  };
 
   const [activeStoreId, setActiveStoreId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
@@ -392,32 +455,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const rawUsers = getStoredData<User[]>(STORAGE_KEYS.USERS, INITIAL_USERS);
     let hasSuperAdmin = false;
     const healedSuperUsers = rawUsers.map((u) => {
-      if (u.id === 'user-super' || u.role === 'SUPER_ADMIN') {
+      const norm = normalizeUserRecord(u);
+      if (norm.id === 'user-super' || norm.role === 'SUPER_ADMIN') {
         hasSuperAdmin = true;
-        return {
-          ...u,
-          role: 'SUPER_ADMIN' as UserRole,
-          store_id: null,
-          position: 'Super Administrator',
-          status_peran_kerja: 'Super Administrator',
-        };
       }
-      return u;
+      return norm;
     });
 
     if (!hasSuperAdmin) {
-      healedSuperUsers.unshift(INITIAL_USERS[0]);
+      healedSuperUsers.unshift(normalizeUserRecord(INITIAL_USERS[0]));
     }
 
-    // Database integrity: Enforce that every user has a UNIQUE email & email_tertaut
+    // Database integrity: Enforce that every user has a UNIQUE email & email_tertaut across different users
     const seenEmails = new Set<string>();
     return healedSuperUsers.map((user) => {
       let currentEmail = user.email ? user.email.trim().toLowerCase() : '';
       let currentTertaut = user.email_tertaut ? user.email_tertaut.trim().toLowerCase() : undefined;
-      let isVerified = user.is_email_verified;
+      let isVerified = Boolean(user.is_email_verified);
 
       if (currentEmail && seenEmails.has(currentEmail)) {
-        // Duplicate email found in database! Restore to initial unique default email for this user
+        // Duplicate email found across different users! Restore to unique email for this user
         const originalUser = INITIAL_USERS.find((u) => u.id === user.id);
         currentEmail = originalUser?.email?.toLowerCase() || `${user.username || 'user'}_${user.id}@gmail.com`;
         currentTertaut = undefined;
@@ -426,7 +483,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         seenEmails.add(currentEmail);
       }
 
-      if (currentTertaut && seenEmails.has(currentTertaut)) {
+      if (currentTertaut && currentTertaut !== currentEmail && seenEmails.has(currentTertaut)) {
         currentTertaut = undefined;
         isVerified = false;
       } else if (currentTertaut) {
@@ -439,14 +496,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         positionVal = orig?.position || (user.role === 'ADMIN_TOKO' ? 'Kepala Toko' : user.role === 'SUPER_ADMIN' ? 'Admin Sistem' : 'Staf / Teknisi');
       }
 
-      return {
+      return normalizeUserRecord({
         ...user,
         email: currentEmail,
         email_tertaut: currentTertaut,
         is_email_verified: isVerified,
         position: positionVal,
         status_peran_kerja: positionVal,
-      };
+      });
     });
   });
   const [inventory, setInventory] = useState<InventoryItem[]>(() =>
@@ -579,9 +636,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [activeStoreId]);
 
+  // Keep isFirstLoginModalOpen strictly synchronized with the active user's must_change_password flag
+  useEffect(() => {
+    if (!currentUser || !currentUser.must_change_password) {
+      setIsFirstLoginModalOpen(false);
+    } else if (currentUser.must_change_password) {
+      setIsFirstLoginModalOpen(true);
+    }
+  }, [currentUser?.id, currentUser?.must_change_password]);
+
   // Auto-sync all data changes to MySQL backend automatically (real-time sync)
   useEffect(() => {
     if (!currentUser) return; // Never auto-sync while user is not logged in / on login screen
+    if (!isInitialLoadCompleteRef.current) return; // Wait until initial DB fetch completes before pushing bulk state
     if (isRemoteSyncRef.current) {
       isRemoteSyncRef.current = false;
       return; // Skip auto-sync because this state change was fetched from server
@@ -589,8 +656,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const timer = setTimeout(async () => {
       try {
+        const activeUser = currentUserRef.current;
+        if (!activeUser) return;
         // Only Super Admin can push the full users collection to MySQL
-        const usersToSync = currentUser.role === 'SUPER_ADMIN' ? users : undefined;
+        const usersToSync = activeUser.role === 'SUPER_ADMIN' ? users : undefined;
         const res = await fetch('/api/sync-all', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -605,8 +674,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             attendance,
             activityLogs,
             notifications,
-            callerRole: currentUser.role,
-            callerUserId: currentUser.id,
+            callerRole: activeUser.role,
+            callerUserId: activeUser.id,
           }),
         });
 
@@ -638,33 +707,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Keep currentUser synchronized with latest changes in users collection, or immediately kick out if deleted/deactivated
   useEffect(() => {
-    if (currentUser) {
+    if (!currentUser) return;
+    const pending = recentlyModifiedUsersRef.current[currentUser.id];
+    if (pending && Date.now() - pending.timestamp < 10000) {
+      // Do not overwrite currentUser with older array state while a local modification is being saved
+      return;
+    }
+
+    const liveUser = users.find((u) => u.id === currentUser.id);
+    if (!liveUser) {
       if (currentUser.role !== 'SUPER_ADMIN') {
-        const liveUser = users.find((u) => u.id === currentUser.id);
-        if (!liveUser) {
-          forceLogoutInactiveUser('DELETED');
-          return;
-        }
-        if (liveUser.status === 'NONAKTIF') {
-          forceLogoutInactiveUser('NONAKTIF');
-          return;
-        }
-        if (
-          liveUser.position !== currentUser.position ||
-          liveUser.status_peran_kerja !== currentUser.status_peran_kerja ||
-          liveUser.nama !== currentUser.nama ||
-          liveUser.email !== currentUser.email ||
-          liveUser.email_tertaut !== currentUser.email_tertaut ||
-          liveUser.is_email_verified !== currentUser.is_email_verified ||
-          liveUser.nomor_telepon !== currentUser.nomor_telepon ||
-          liveUser.role !== currentUser.role ||
-          liveUser.store_id !== currentUser.store_id ||
-          liveUser.avatar !== currentUser.avatar ||
-          liveUser.foto_profil !== currentUser.foto_profil
-        ) {
-          setCurrentUser(liveUser);
-        }
+        forceLogoutInactiveUser('DELETED');
       }
+      return;
+    }
+
+    if (currentUser.role !== 'SUPER_ADMIN' && liveUser.status === 'NONAKTIF') {
+      forceLogoutInactiveUser('NONAKTIF');
+      return;
+    }
+
+    // Strict ID guard: never allow currentUser to switch to a different user ID
+    if (liveUser.id !== currentUser.id) return;
+
+    const normLive = normalizeUserRecord(liveUser);
+    if (
+      normLive.position !== currentUser.position ||
+      normLive.status_peran_kerja !== currentUser.status_peran_kerja ||
+      normLive.nama !== currentUser.nama ||
+      normLive.email !== currentUser.email ||
+      normLive.email_tertaut !== currentUser.email_tertaut ||
+      Boolean(normLive.is_email_verified) !== Boolean(currentUser.is_email_verified) ||
+      normLive.nomor_telepon !== currentUser.nomor_telepon ||
+      normLive.role !== currentUser.role ||
+      normLive.store_id !== currentUser.store_id ||
+      normLive.avatar !== currentUser.avatar ||
+      normLive.foto_profil !== currentUser.foto_profil ||
+      normLive.password_hash !== currentUser.password_hash ||
+      Boolean(normLive.must_change_password) !== Boolean(currentUser.must_change_password)
+    ) {
+      setCurrentUser(normLive);
     }
   }, [users, currentUser]);
 
@@ -685,52 +767,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (resData.ok) {
           const dataJson = await resData.json();
           if (dataJson.success && dataJson.data) {
-          const d = dataJson.data;
-          if (Array.isArray(d.stores)) setStores(d.stores);
-          const firstStoreId = (d.stores && d.stores[0]?.id) || null;
-          if (Array.isArray(d.users) && d.users.length > 0) {
-            setUsers(d.users.map((u: any) => ({
-              ...u,
-              nama: (u.nama || u.name || '').replace(/\s*\((\s*|0)\)/g, '').replace(/\s+0$/, '').trim(),
-              name: (u.name || u.nama || '').replace(/\s*\((\s*|0)\)/g, '').replace(/\s+0$/, '').trim(),
-            })));
-          }
-          if (Array.isArray(d.categories)) {
-            setCategories(d.categories.map((c: any) => ({
-              ...c,
-              store_id: c.store_id || firstStoreId,
-            })));
-          }
-          if (Array.isArray(d.iphoneSeries)) {
-            setIphoneSeries(d.iphoneSeries.map((s: any) => ({
-              ...s,
-              store_id: s.store_id || firstStoreId,
-            })));
-          }
-          if (Array.isArray(d.inventory)) setInventory(d.inventory);
-          if (Array.isArray(d.transactions)) setTransactions(d.transactions);
-          if (Array.isArray(d.returns)) {
-            setReturns(d.returns.map((r: any) => ({
-              ...r,
-              catatan_approval: r.catatan_approval ? r.catatan_approval.replace(/\s*\(Disetujui\)/gi, '').trim() : r.catatan_approval,
-              catatan_proses: r.catatan_proses ? r.catatan_proses.replace(/\s*\(Disetujui\)/gi, '').trim() : r.catatan_proses,
-            })));
-          }
-          if (Array.isArray(d.attendance)) {
-            setAttendance(
-              d.attendance.filter((a: any) => a.user_id !== 'user-super' && !a.user_name?.toLowerCase().includes('super admin'))
-            );
-          }
-          if (Array.isArray(d.activityLogs)) setActivityLogs(sanitizeActivityLogs(d.activityLogs));
-          if (Array.isArray(d.notifications)) {
-            const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUser?.id));
-            setNotifications(sanitizeNotifications(normalized));
+            isRemoteSyncRef.current = true;
+            const d = dataJson.data;
+            if (Array.isArray(d.stores)) setStores(d.stores);
+            const firstStoreId = (d.stores && d.stores[0]?.id) || null;
+            if (Array.isArray(d.users) && d.users.length > 0) {
+              setUsers(mergeServerUsersWithLocalPending(d.users));
+            }
+            if (Array.isArray(d.categories)) {
+              setCategories(d.categories.map((c: any) => ({
+                ...c,
+                store_id: c.store_id || firstStoreId,
+              })));
+            }
+            if (Array.isArray(d.iphoneSeries)) {
+              setIphoneSeries(d.iphoneSeries.map((s: any) => ({
+                ...s,
+                store_id: s.store_id || firstStoreId,
+              })));
+            }
+            if (Array.isArray(d.inventory)) setInventory(d.inventory);
+            if (Array.isArray(d.transactions)) setTransactions(d.transactions);
+            if (Array.isArray(d.returns)) {
+              setReturns(d.returns.map((r: any) => ({
+                ...r,
+                catatan_approval: r.catatan_approval ? r.catatan_approval.replace(/\s*\(Disetujui\)/gi, '').trim() : r.catatan_approval,
+                catatan_proses: r.catatan_proses ? r.catatan_proses.replace(/\s*\(Disetujui\)/gi, '').trim() : r.catatan_proses,
+              })));
+            }
+            if (Array.isArray(d.attendance)) {
+              setAttendance(
+                d.attendance.filter((a: any) => a.user_id !== 'user-super' && !a.user_name?.toLowerCase().includes('super admin'))
+              );
+            }
+            if (Array.isArray(d.activityLogs)) setActivityLogs(sanitizeActivityLogs(d.activityLogs));
+            if (Array.isArray(d.notifications)) {
+              const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUserRef.current?.id));
+              setNotifications(sanitizeNotifications(normalized));
+            }
           }
         }
-      }
-    } catch {
+      } catch {
         // Mode offline aktif, menggunakan data tersimpan di localStorage
       } finally {
+        isInitialLoadCompleteRef.current = true;
         setIsCheckingDb(false);
       }
     };
@@ -950,46 +1030,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const login = async (
     identifier: string,
     passwordPlain?: string,
-    role?: UserRole,
-    storeId?: string
+    _role?: UserRole,
+    _storeId?: string
   ): Promise<{ success: boolean; mustChangePassword?: boolean; message?: string }> => {
     const cleanId = identifier.trim().toLowerCase();
-    const cleanPhone = identifier.replace(/\D/g, '');
+    const isEmailInput = cleanId.includes('@');
+    const cleanPhone = !isEmailInput ? identifier.replace(/\D/g, '') : '';
 
     const findMatch = (userList: User[]) => {
-      return userList.find((u) => {
-        const matchEmail = u.email && u.email.toLowerCase() === cleanId;
-        const matchLinkedEmail = u.email_tertaut && u.email_tertaut.toLowerCase() === cleanId;
-        const matchUsername = u.username && u.username.toLowerCase() === cleanId;
+      // 1. Prioritaskan kecocokan persis pada email, email_tertaut, atau username
+      const byExactIdentifier = userList.find((u) => {
+        const matchEmail = u.email && u.email.trim().toLowerCase() === cleanId;
+        const matchLinkedEmail = u.email_tertaut && u.email_tertaut.trim().toLowerCase() === cleanId;
+        const matchUsername = u.username && u.username.trim().toLowerCase() === cleanId;
         const matchSuper = (cleanId === 'superadmin' || cleanId === 'super admin' || cleanId === 'superadmin@gmail.com') && u.role === 'SUPER_ADMIN';
-        const matchPhone = cleanPhone && ((u.nomor_telepon && u.nomor_telepon.replace(/\D/g, '') === cleanPhone) || (u.no_hp && u.no_hp.replace(/\D/g, '') === cleanPhone));
-        return matchEmail || matchLinkedEmail || matchUsername || matchSuper || matchPhone;
+        return Boolean(matchEmail || matchLinkedEmail || matchUsername || matchSuper);
       });
+      if (byExactIdentifier) return normalizeUserRecord(byExactIdentifier);
+
+      // 2. Hanya cocokkan nomor telepon jika input bukan email dan panjang angka minimal 6 digit
+      if (!isEmailInput && cleanPhone.length >= 6) {
+        const byPhone = userList.find((u) => {
+          const phone1 = u.nomor_telepon ? u.nomor_telepon.replace(/\D/g, '') : '';
+          const phone2 = u.no_hp ? u.no_hp.replace(/\D/g, '') : '';
+          return (phone1 && phone1 === cleanPhone) || (phone2 && phone2 === cleanPhone);
+        });
+        if (byPhone) return normalizeUserRecord(byPhone);
+      }
+
+      return undefined;
     };
 
     let foundUser = findMatch(users);
 
-    // Real-Time Sync: Jika akun tidak ditemukan di memori browser saat ini (misal akun Joko baru dibuat di browser/perangkat lain),
-    // lakukan query langsung ke database secara instan tanpa perlu user me-refresh halaman!
-    if (!foundUser) {
+    // Helper untuk mengambil data terbaru dari server jika user belum ditemukan atau jika password di memori lokal belum ter-update dari perangkat lain
+    const refreshUsersFromServer = async (): Promise<User[] | null> => {
       try {
         const res = await fetch('/api/data');
         if (res.ok) {
           const json = await res.json();
           if (json.success && json.data && Array.isArray(json.data.users)) {
-            const freshUsers: User[] = json.data.users;
-            setUsers(freshUsers);
-            foundUser = findMatch(freshUsers);
+            isRemoteSyncRef.current = true;
+            const merged = mergeServerUsersWithLocalPending(json.data.users);
+            setUsers(merged);
+            return merged;
           }
         }
       } catch (err) {
         console.warn('Real-time auth fetch error:', err);
       }
+      return null;
+    };
+
+    // Real-Time Sync: Jika akun tidak ditemukan di memori browser saat ini, query langsung ke database
+    if (!foundUser) {
+      const freshUsers = await refreshUsersFromServer();
+      if (freshUsers) {
+        foundUser = findMatch(freshUsers);
+      }
     }
 
-    if (!foundUser && role) {
-      foundUser = users.find((u) => u.role === role);
-    }
     if (!foundUser) {
       return {
         success: false,
@@ -999,8 +1099,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 1. Verifikasi Kata Sandi terlebih dahulu sebelum memeriksa status akun atau cabang toko
     if (passwordPlain !== undefined && passwordPlain !== '••••••••') {
-      const storedHash = foundUser.password || foundUser.password_hash || '';
-      const isMatch = verifyPassword(passwordPlain, storedHash);
+      let storedHash = foundUser.password_hash || foundUser.password || '';
+      let isMatch = verifyPassword(passwordPlain, storedHash);
+
+      // Jika belum cocok di memori lokal (misal sandi baru saja diganti di perangkat lain), cek ulang ke database MySQL
+      if (!isMatch) {
+        const freshUsers = await refreshUsersFromServer();
+        if (freshUsers) {
+          const refreshedMatch = findMatch(freshUsers);
+          if (refreshedMatch && refreshedMatch.id === foundUser.id) {
+            foundUser = refreshedMatch;
+            storedHash = foundUser.password_hash || foundUser.password || '';
+            isMatch = verifyPassword(passwordPlain, storedHash);
+          }
+        }
+      }
+
       if (!isMatch) {
         showToast('Kata Sandi Salah', 'Kata sandi yang Anda masukkan tidak sesuai.', 'error');
         return { success: false, message: 'Kata sandi tidak sesuai. Silakan periksa kembali atau gunakan Lupa Password.' };
@@ -1053,16 +1167,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    setCurrentUser(foundUser);
+    const normalizedFoundUser = normalizeUserRecord(foundUser);
+    currentUserRef.current = normalizedFoundUser;
+    setCurrentUser(normalizedFoundUser);
     try {
-      sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(foundUser));
+      sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(normalizedFoundUser));
       localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
     } catch {}
     setSidebarOpen(false);
-    showToast('Login Berhasil', `Selamat datang kembali, ${foundUser.nama || foundUser.name}!`, 'success');
+    showToast('Login Berhasil', `Selamat datang kembali, ${normalizedFoundUser.nama || normalizedFoundUser.name}!`, 'success');
 
     // Record login activity log
-    const storeObj = stores.find((s) => s.id === foundUser.store_id);
+    const storeObj = stores.find((s) => s.id === normalizedFoundUser.store_id);
     const now = new Date();
     const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate()
@@ -1072,13 +1188,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     )}:${String(now.getSeconds()).padStart(2, '0')}`;
     const loginLog: ActivityLog = {
       id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      user_id: foundUser.id,
-      user_name: foundUser.nama || foundUser.name,
-      role: foundUser.role,
-      store_id: foundUser.store_id || null,
+      user_id: normalizedFoundUser.id,
+      user_name: normalizedFoundUser.nama || normalizedFoundUser.name,
+      role: normalizedFoundUser.role,
+      store_id: normalizedFoundUser.store_id || null,
       store_name: storeObj ? `${storeObj.nama_toko} (${storeObj.cabang})` : 'Pusat / Semua Cabang',
       aktivitas: 'Login ke Sistem',
-      detail_perubahan: `Pengguna berhasil login sebagai ${foundUser.role}`,
+      detail_perubahan: `Pengguna berhasil login sebagai ${normalizedFoundUser.role}`,
       waktu: formattedDate,
       tipe: 'AUTH',
     };
@@ -1087,14 +1203,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Multi-Store Access Control Rules:
     // Super Admin: goes directly to DASHBOARD_UTAMA (Global overview)
     // Admin Toko & Karyawan: strictly locked to assigned store_id and straight to Dashboard Toko
-    if (foundUser.role === 'SUPER_ADMIN') {
+    if (normalizedFoundUser.role === 'SUPER_ADMIN') {
       setActiveStoreId(null);
       setCurrentPage('DASHBOARD_UTAMA');
       try {
         sessionStorage.setItem('iphone_pos_active_page_v1', 'DASHBOARD_UTAMA');
       } catch {}
     } else {
-      const assignedStoreId = foundUser.store_id || null;
+      const assignedStoreId = normalizedFoundUser.store_id || null;
       setActiveStoreId(assignedStoreId);
       setCurrentPage('DASHBOARD_TOKO');
       try {
@@ -1102,28 +1218,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {}
     }
 
-    if (foundUser.must_change_password) {
-      setIsFirstLoginModalOpen(true);
-    }
+    const mustChange = Boolean(normalizedFoundUser.must_change_password);
+    setIsFirstLoginModalOpen(mustChange);
 
-    return { success: true, mustChangePassword: foundUser.must_change_password };
+    return { success: true, mustChangePassword: mustChange };
   };
 
   const completeFirstTimePasswordChange = (newPasswordPlain: string): boolean => {
-    if (!currentUser) return false;
+    const activeUser = currentUserRef.current || currentUser;
+    if (!activeUser) return false;
     if (newPasswordPlain.length < 6) {
       showToast('Sandi Terlalu Pendek', 'Kata sandi baru minimal harus 6 karakter.', 'warning');
       return false;
     }
     const hashed = hashPasswordSync(newPasswordPlain);
-    const updated: User = {
-      ...currentUser,
+    const updated: User = normalizeUserRecord({
+      ...activeUser,
       password: hashed,
       password_hash: hashed,
       must_change_password: false,
-    };
+    });
+    currentUserRef.current = updated;
     setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updated.id ? updated : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updated);
     setIsFirstLoginModalOpen(false);
     showToast('Kata Sandi Diperbarui', 'Kata sandi baru berhasil disimpan. Akun Anda kini aman.', 'success');
     return true;
@@ -1133,13 +1257,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     identifier: string
   ): Promise<{ success: boolean; token?: string; targetEmail?: string; message: string }> => {
     const clean = identifier.trim().toLowerCase();
-    const cleanPhone = identifier.replace(/\D/g, '');
+    const isEmailInput = clean.includes('@');
+    const cleanPhone = !isEmailInput ? identifier.replace(/\D/g, '') : '';
 
     const targetUser = users.find((u) => {
-      const matchEmail = u.email && u.email.toLowerCase() === clean;
-      const matchLinkedEmail = u.email_tertaut && u.email_tertaut.toLowerCase() === clean;
-      const matchUsername = u.username && u.username.toLowerCase() === clean;
-      const matchPhone = cleanPhone && ((u.nomor_telepon && u.nomor_telepon.replace(/\D/g, '') === cleanPhone) || (u.no_hp && u.no_hp.replace(/\D/g, '') === cleanPhone));
+      const matchEmail = u.email && u.email.trim().toLowerCase() === clean;
+      const matchLinkedEmail = u.email_tertaut && u.email_tertaut.trim().toLowerCase() === clean;
+      const matchUsername = u.username && u.username.trim().toLowerCase() === clean;
+      const matchPhone = !isEmailInput && cleanPhone.length >= 6 && ((u.nomor_telepon && u.nomor_telepon.replace(/\D/g, '') === cleanPhone) || (u.no_hp && u.no_hp.replace(/\D/g, '') === cleanPhone));
       return matchEmail || matchLinkedEmail || matchUsername || matchPhone;
     });
 
@@ -1238,18 +1363,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const hashed = hashPasswordSync(newPasswordPlain);
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.id === targetUser.id
-          ? {
-              ...u,
-              password: hashed,
-              password_hash: hashed,
-              must_change_password: false,
-            }
-          : u
-      )
-    );
+    const updatedTargetUser: User = normalizeUserRecord({
+      ...targetUser,
+      password: hashed,
+      password_hash: hashed,
+      must_change_password: false,
+    });
+
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === targetUser.id ? updatedTargetUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    if (currentUserRef.current?.id === updatedTargetUser.id) {
+      currentUserRef.current = updatedTargetUser;
+      setCurrentUser(updatedTargetUser);
+    }
+    persistUserToBackend(updatedTargetUser);
 
     setResetTokens((prev) => prev.filter((t) => t.token !== tokenObj.token));
     showToast('Reset Password Sukses', 'Kata sandi Anda telah berhasil diperbarui. Silakan login dengan kata sandi baru.', 'success');
@@ -1285,18 +1417,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const tempPassword = tempPasswordPlain && tempPasswordPlain.trim() ? tempPasswordPlain.trim() : 'Pass123!';
     const hashed = hashPasswordSync(tempPassword);
 
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.id === userId
-          ? {
-              ...u,
-              password: hashed,
-              password_hash: hashed,
-              must_change_password: true, // Wajib ganti saat login berikutnya!
-            }
-          : u
-      )
-    );
+    const updatedTarget: User = normalizeUserRecord({
+      ...target,
+      password: hashed,
+      password_hash: hashed,
+      must_change_password: true, // Wajib ganti saat login berikutnya!
+    });
+
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === userId ? updatedTarget : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedTarget);
 
     logActivity(
       'Reset Password Pengguna (Admin)',
@@ -1319,7 +1454,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const linkUserEmail = (email: string): { success: boolean; message: string } => {
-    if (!currentUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
+    const activeUser = currentUserRef.current || currentUser;
+    if (!activeUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
     const clean = email.trim().toLowerCase();
     if (!clean.includes('@') || !clean.includes('.')) {
       showToast('Format Email Salah', 'Masukkan alamat email yang valid.', 'warning');
@@ -1329,7 +1465,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // STRICT CHECK: Ensure this email is not already used or linked by ANY other user
     const conflictUser = users.find(
       (u) =>
-        u.id !== currentUser.id &&
+        u.id !== activeUser.id &&
         ((u.email && u.email.trim().toLowerCase() === clean) ||
           (u.email_tertaut && u.email_tertaut.trim().toLowerCase() === clean))
     );
@@ -1346,16 +1482,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const updatedUser: User = {
-      ...currentUser,
+    const updatedUser: User = normalizeUserRecord({
+      ...activeUser,
       email: clean,
       email_tertaut: clean,
       is_email_verified: true,
       email_verified_at: new Date().toISOString(),
-    };
+    });
 
+    currentUserRef.current = updatedUser;
     setCurrentUser(updatedUser);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedUser);
     logActivity('Tautkan Email Gmail', `Menautkan akun Gmail: ${clean}`, 'USER');
     showToast('Email Gmail Terverifikasi', `Akun Gmail ${clean} berhasil ditautkan dan terverifikasi.`, 'success');
     return { success: true, message: `Akun Gmail ${clean} berhasil ditautkan.` };
@@ -1366,8 +1510,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const emailToUnlink = (currentUser.email_tertaut || currentUser.email || '').trim().toLowerCase();
 
-    // If user's email is currently verified, strict OTP verification is required to prevent unauthorized unlinking!
-    if (currentUser.is_email_verified) {
+    // If user's email is currently verified and NOT Super Admin, strict OTP verification is required
+    if (currentUser.is_email_verified && currentUser.role !== 'SUPER_ADMIN') {
       if (!otpCode || otpCode.trim().length < 6) {
         showToast('Kode OTP Diperlukan', 'Masukkan 6 digit kode OTP verifikasi untuk memutuskan tautan email.', 'warning');
         return { success: false, message: 'Kode OTP verifikasi diperlukan untuk memutuskan tautan email.' };
@@ -1396,18 +1540,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setEmailOtps((prev) => prev.filter((o) => o.email !== emailToUnlink));
     }
 
-    const updatedUser: User = {
+    const updatedUser: User = normalizeUserRecord({
       ...currentUser,
       email_tertaut: undefined,
       is_email_verified: false,
       email_verified_at: undefined,
-    };
+    });
 
+    currentUserRef.current = updatedUser;
     setCurrentUser(updatedUser);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedUser);
+
     logActivity('Putus Tautan Email Gmail', `Memutuskan tautan akun Gmail ${emailToUnlink}`, 'USER');
 
-    showToast('Tautan Berhasil Diputus', 'Tautan email akun telah berhasil diputuskan setelah verifikasi keamanan OTP.', 'success');
+    showToast('Tautan Berhasil Diputus', 'Tautan email akun telah berhasil diputuskan.', 'success');
     return { success: true, message: 'Tautan email telah berhasil diputus.' };
   };
 
@@ -1547,7 +1700,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const changeVerifiedEmail = (newEmail: string): { success: boolean; message: string } => {
-    if (!currentUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
+    const activeUser = currentUserRef.current || currentUser;
+    if (!activeUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
 
     const clean = newEmail.trim().toLowerCase();
     if (!clean || !clean.includes('@') || !clean.includes('.')) {
@@ -1558,7 +1712,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Enforce uniqueness across all other accounts
     const conflictUser = users.find(
       (u) =>
-        u.id !== currentUser.id &&
+        u.id !== activeUser.id &&
         ((u.email && u.email.trim().toLowerCase() === clean) ||
           (u.email_tertaut && u.email_tertaut.trim().toLowerCase() === clean))
     );
@@ -1575,26 +1729,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const updatedUser: User = {
-      ...currentUser,
+    const updatedUser: User = normalizeUserRecord({
+      ...activeUser,
       email: clean,
       username: clean,
       email_tertaut: undefined,
       is_email_verified: false,
       email_verified_at: undefined,
-    };
+    });
 
+    currentUserRef.current = updatedUser;
     setCurrentUser(updatedUser);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedUser);
+
     logActivity('Ganti Email Akun', `Memperbarui alamat email menjadi: ${clean}`, 'USER');
     showToast('Email Berhasil Diubah', `Alamat email berhasil diubah menjadi ${clean}. Silakan klik 'Kirim Kode OTP' jika ingin menautkannya.`, 'success');
     return { success: true, message: 'Email berhasil diubah.' };
   };
 
   const changePassword = (oldPasswordPlain: string, newPasswordPlain: string): { success: boolean; message: string } => {
-    if (!currentUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
+    const activeUser = currentUserRef.current || currentUser;
+    if (!activeUser) return { success: false, message: 'Tidak ada sesi login aktif.' };
 
-    const currentHash = currentUser.password || currentUser.password_hash || '';
+    const currentHash = activeUser.password_hash || activeUser.password || '';
     if (currentHash && !verifyPassword(oldPasswordPlain, currentHash)) {
       showToast('Kata Sandi Saat Ini Salah', 'Kata sandi lama yang Anda masukkan tidak sesuai.', 'error');
       return { success: false, message: 'Kata sandi saat ini tidak cocok.' };
@@ -1606,21 +1770,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const newHash = hashPasswordSync(newPasswordPlain);
-    const updatedUser: User = {
-      ...currentUser,
+    const updatedUser: User = normalizeUserRecord({
+      ...activeUser,
       password: newHash,
       password_hash: newHash,
       must_change_password: false,
-    };
+    });
 
+    currentUserRef.current = updatedUser;
     setCurrentUser(updatedUser);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedUser);
     logActivity('Ganti Kata Sandi', 'Pengguna berhasil memperbarui kata sandi akun', 'AUTH');
     showToast('Kata Sandi Berhasil Diganti', 'Kata sandi akun Anda berhasil diperbarui.', 'success');
     return { success: true, message: 'Kata sandi berhasil diganti.' };
   };
 
   const logout = () => {
+    currentUserRef.current = null;
     setCurrentUser(null);
     setActiveStoreId(null);
     try {
@@ -1789,7 +1962,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const hashedPassword = profileData.password ? hashPasswordSync(profileData.password) : (currentUser.password || currentUser.password_hash);
     const isSuper = currentUser.role === 'SUPER_ADMIN' || currentUser.id === 'user-super';
 
-    const updatedUser: User = {
+    const updatedUser: User = normalizeUserRecord({
       ...currentUser,
       nama: resolvedName,
       name: resolvedName,
@@ -1806,22 +1979,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       password: hashedPassword,
       password_hash: hashedPassword,
       must_change_password: false,
-    };
+    });
 
+    currentUserRef.current = updatedUser;
     setCurrentUser(updatedUser);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updatedUser : u)));
-    try {
-      sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updatedUser));
-    } catch {}
-
-    // Instant real-time persist to MySQL database
-    try {
-      fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedUser),
-      }).catch(() => {});
-    } catch {}
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    persistUserToBackend(updatedUser);
 
     logActivity('Perbarui Profil', `Memperbarui data profil: ${resolvedName} (${newEmail || '-'})`, 'USER');
     showToast('Profil Diperbarui', isEmailChanged ? `Email berhasil diubah menjadi ${newEmail}.` : 'Data profil Anda telah berhasil disimpan.', 'success');
@@ -2933,7 +3102,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const cleanNameStr = (userData.nama || userData.name || '').replace(/\s*\((\s*|0)\)/g, '').replace(/\s+0$/, '').trim();
 
-    const newUser: User = {
+    const newUser: User = normalizeUserRecord({
       ...userData,
       nama: cleanNameStr,
       name: cleanNameStr,
@@ -2950,18 +3119,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       password_hash: hashedPassword,
       must_change_password: true, // Wajib ganti password saat login pertama kali!
       created_at: new Date().toISOString().split('T')[0],
-    };
+    });
 
-    setUsers((prev) => [...prev, newUser]);
+    setUsers((prev) => {
+      const next = [...prev, newUser];
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
 
     // Instant real-time push to MySQL backend so newly created account is recognized immediately without refresh
-    try {
-      fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newUser),
-      }).catch(() => {});
-    } catch {}
+    persistUserToBackend(newUser);
 
     logActivity(
       'Buat Akun Karyawan',
@@ -3023,21 +3192,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       finalData.position = p;
       finalData.status_peran_kerja = p;
     }
-    const updatedUserObj = { ...target, ...finalData };
+    const updatedUserObj = normalizeUserRecord({ ...target, ...finalData });
     const updatedUsers = users.map((u) => (u.id === id ? updatedUserObj : u));
     setUsers(updatedUsers);
-    if (currentUser?.id === id) {
-      setCurrentUser((prev) => (prev ? { ...prev, ...finalData } : prev));
+    try {
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
+    } catch {}
+    if (currentUserRef.current?.id === id) {
+      currentUserRef.current = updatedUserObj;
+      setCurrentUser(updatedUserObj);
     }
 
     // Direct push to database
-    try {
-      fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedUserObj),
-      }).catch(() => {});
-    } catch {}
+    persistUserToBackend(updatedUserObj);
 
     const { updated: reconciledAtt, hasChanges } = reconcileAttendanceRecords(attendance, updatedUsers, stores);
     if (hasChanges) {
@@ -3056,6 +3223,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Akun Super Admin sistem tidak dapat dihapus.' };
     }
 
+    delete recentlyModifiedUsersRef.current[id];
+
     try {
       await fetch(`/api/users/${id}`, { method: 'DELETE' });
     } catch {
@@ -3063,7 +3232,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setUsers((prev) => prev.filter((u) => u.id !== id));
-    if (currentUser?.id === id) {
+    if (currentUserRef.current?.id === id) {
       forceLogoutInactiveUser('DELETED');
     }
     logActivity('Hapus Pengguna Permanen', `Menghapus akun ${target.nama || target.name} (${target.email || target.username}) secara permanen`, 'USER', target.store_id);
@@ -3091,16 +3260,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const nextStatus: 'AKTIF' | 'NONAKTIF' = explicitStatus || (target.status === 'AKTIF' ? 'NONAKTIF' : 'AKTIF');
-    const updatedUser: User = { ...target, status: nextStatus };
+    const updatedUser: User = normalizeUserRecord({ ...target, status: nextStatus });
 
-    setUsers((prev) => prev.map((u) => (u.id === id ? updatedUser : u)));
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === id ? updatedUser : u));
+      try {
+        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
 
     // Direct push to database
-    fetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedUser),
-    }).catch(() => {});
+    persistUserToBackend(updatedUser);
 
     logActivity(
       nextStatus === 'AKTIF' ? 'Aktifkan Akun' : 'Nonaktifkan Akun',
@@ -3133,36 +3304,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const target = users.find((u) => u.id === userId);
     if (!target) return;
 
-    const updatedUsers = users.map((u) =>
-      u.id === userId
-        ? {
-            ...u,
-            jam_masuk_standar: schedule.jam_masuk_standar,
-            jam_pulang_standar: schedule.jam_pulang_standar,
-            toleransi_keterlambatan_menit:
-              schedule.toleransi_keterlambatan_menit !== undefined
-                ? schedule.toleransi_keterlambatan_menit
-                : u.toleransi_keterlambatan_menit ?? 0,
-          }
-        : u
-    );
-    setUsers(updatedUsers);
+    const updatedTarget: User = normalizeUserRecord({
+      ...target,
+      jam_masuk_standar: schedule.jam_masuk_standar,
+      jam_pulang_standar: schedule.jam_pulang_standar,
+      toleransi_keterlambatan_menit:
+        schedule.toleransi_keterlambatan_menit !== undefined
+          ? schedule.toleransi_keterlambatan_menit
+          : target.toleransi_keterlambatan_menit ?? 0,
+    });
 
-    if (currentUser?.id === userId) {
-      setCurrentUser((prev) =>
-        prev
-          ? {
-              ...prev,
-              jam_masuk_standar: schedule.jam_masuk_standar,
-              jam_pulang_standar: schedule.jam_pulang_standar,
-              toleransi_keterlambatan_menit:
-                schedule.toleransi_keterlambatan_menit !== undefined
-                  ? schedule.toleransi_keterlambatan_menit
-                  : prev.toleransi_keterlambatan_menit ?? 0,
-            }
-          : prev
-      );
+    const updatedUsers = users.map((u) => (u.id === userId ? updatedTarget : u));
+    setUsers(updatedUsers);
+    try {
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
+    } catch {}
+
+    if (currentUserRef.current?.id === userId) {
+      currentUserRef.current = updatedTarget;
+      setCurrentUser(updatedTarget);
     }
+
+    persistUserToBackend(updatedTarget);
 
     const { updated: reconciledAtt, hasChanges } = reconcileAttendanceRecords(attendance, updatedUsers, stores);
     if (hasChanges) {
@@ -3483,45 +3646,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (Array.isArray(d.stores) && d.stores.length > 0) setStores(d.stores);
         const firstStoreId = (d.stores && d.stores[0]?.id) || (stores.length > 0 ? stores[0].id : null);
         if (Array.isArray(d.users) && d.users.length > 0) {
-          setUsers(d.users);
-          if (currentUser) {
-            if (currentUser.role !== 'SUPER_ADMIN') {
-              const liveUser = d.users.find((u: any) => u.id === currentUser.id);
-              if (!liveUser) {
-                forceLogoutInactiveUser('DELETED');
-                return true;
-              }
-              if (liveUser.status === 'NONAKTIF') {
+          const mergedUsers = mergeServerUsersWithLocalPending(d.users);
+          setUsers(mergedUsers);
+
+          const activeSessionUser = currentUserRef.current;
+          if (activeSessionUser) {
+            const pendingLocal = recentlyModifiedUsersRef.current[activeSessionUser.id];
+            const isRecentlyModifiedLocally = Boolean(pendingLocal && Date.now() - pendingLocal.timestamp < 10000);
+
+            if (!isRecentlyModifiedLocally) {
+              const liveForActive = mergedUsers.find((u) => u.id === activeSessionUser.id);
+              if (!liveForActive) {
+                if (activeSessionUser.role !== 'SUPER_ADMIN') {
+                  forceLogoutInactiveUser('DELETED');
+                  return true;
+                }
+              } else if (activeSessionUser.role !== 'SUPER_ADMIN' && liveForActive.status === 'NONAKTIF') {
                 forceLogoutInactiveUser('NONAKTIF');
                 return true;
-              }
-              setCurrentUser((prev) => {
-                if (!prev) return null;
-                if (
-                  liveUser.email !== prev.email ||
-                  liveUser.nama !== prev.nama ||
-                  liveUser.name !== prev.name ||
-                  liveUser.position !== prev.position ||
-                  liveUser.status_peran_kerja !== prev.status_peran_kerja ||
-                  liveUser.avatar !== prev.avatar ||
-                  liveUser.foto_profil !== prev.foto_profil ||
-                  liveUser.nomor_telepon !== prev.nomor_telepon
-                ) {
-                  const updated = { ...prev, ...liveUser };
-                  try {
-                    sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updated));
-                  } catch {}
-                  return updated;
-                }
-                return prev;
-              });
-            } else {
-              const liveSuper = d.users.find((u: any) => u.id === currentUser.id || u.role === 'SUPER_ADMIN');
-              if (liveSuper) {
+              } else {
                 setCurrentUser((prev) => {
                   if (!prev) return null;
-                  if (liveSuper.email !== prev.email || liveSuper.nama !== prev.nama || liveSuper.avatar !== prev.avatar) {
-                    const updated = { ...prev, ...liveSuper };
+                  // Strict ID check using prev.id so a background poll can NEVER switch one account into another
+                  const strictLiveMatch = mergedUsers.find((u) => u.id === prev.id);
+                  if (!strictLiveMatch || strictLiveMatch.id !== prev.id) return prev;
+
+                  const pendingPrev = recentlyModifiedUsersRef.current[prev.id];
+                  if (pendingPrev && Date.now() - pendingPrev.timestamp < 10000) {
+                    return prev;
+                  }
+
+                  if (
+                    strictLiveMatch.email !== prev.email ||
+                    strictLiveMatch.nama !== prev.nama ||
+                    strictLiveMatch.name !== prev.name ||
+                    strictLiveMatch.position !== prev.position ||
+                    strictLiveMatch.status_peran_kerja !== prev.status_peran_kerja ||
+                    strictLiveMatch.avatar !== prev.avatar ||
+                    strictLiveMatch.foto_profil !== prev.foto_profil ||
+                    strictLiveMatch.nomor_telepon !== prev.nomor_telepon ||
+                    strictLiveMatch.password_hash !== prev.password_hash ||
+                    Boolean(strictLiveMatch.must_change_password) !== Boolean(prev.must_change_password)
+                  ) {
+                    const updated = normalizeUserRecord({ ...prev, ...strictLiveMatch, id: prev.id });
+                    currentUserRef.current = updated;
                     try {
                       sessionStorage.setItem('iphone_pos_session_user_v1', JSON.stringify(updated));
                     } catch {}
@@ -3556,7 +3724,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } catch {}
         }
         if (Array.isArray(d.notifications)) {
-          const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUser?.id));
+          const normalized = d.notifications.map((n: any) => normalizeNotification(n, currentUserRef.current?.id));
           setNotifications(sanitizeNotifications(normalized));
           try {
             localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(sanitizeNotifications(normalized)));
