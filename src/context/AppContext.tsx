@@ -2352,7 +2352,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setInventory((prev) => prev.filter((i) => i.id !== id));
     logActivity('Hapus Barang', `Menghapus ${item.kode_barang} - ${item.nama_barang} (${item.model_iphone})`, 'INVENTORY', item.store_id);
-    showToast('Barang Dihapus', `${item.nama_barang} telah dihapus dari inventaris dan database.`, 'info');
+    showToast('Barang Dihapus', `${item.nama_barang} telah dihapus dari inventaris.`, 'info');
   };
 
   // Categories
