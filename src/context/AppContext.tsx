@@ -2216,6 +2216,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Kategori Komponen Belum Ada', 'Silakan buat Kategori Sparepart terlebih dahulu di menu Kategori Sparepart sebelum menambahkan komponen.', 'warning');
       return;
     }
+    const cleanCode = (data.kode_barang || '').trim();
+    const duplicate = inventory.find(
+      (i) => i.store_id === data.store_id && i.kode_barang.trim().toLowerCase() === cleanCode.toLowerCase()
+    );
+    if (duplicate) {
+      showToast(
+        'Kode Barang Sudah Digunakan',
+        `Kode barang "${cleanCode}" sudah digunakan oleh komponen "${duplicate.nama_barang}" (${duplicate.model_iphone}). Silakan gunakan kode barang lain.`,
+        'warning'
+      );
+      return;
+    }
     const id = `inv-${Date.now()}`;
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
@@ -2286,6 +2298,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Kategori Komponen Belum Ada', 'Kategori komponen tidak boleh kosong.', 'warning');
       return;
     }
+    const targetItem = inventory.find((i) => i.id === id);
+    if (targetItem && data.kode_barang !== undefined) {
+      const cleanCode = data.kode_barang.trim();
+      const duplicate = inventory.find(
+        (i) =>
+          i.id !== id &&
+          i.store_id === targetItem.store_id &&
+          i.kode_barang.trim().toLowerCase() === cleanCode.toLowerCase()
+      );
+      if (duplicate) {
+        showToast(
+          'Kode Barang Sudah Digunakan',
+          `Kode barang "${cleanCode}" sudah digunakan oleh komponen "${duplicate.nama_barang}" (${duplicate.model_iphone}). Silakan gunakan kode barang lain.`,
+          'warning'
+        );
+        return;
+      }
+    }
     setInventory((prev) =>
       prev.map((item) => {
         if (item.id === id) {
@@ -2303,7 +2333,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return item;
       })
     );
-    const targetItem = inventory.find((i) => i.id === id);
     logActivity('Edit Komponen iPhone', `Mengubah data komponen iPhone: ${targetItem?.nama_barang || 'Komponen'}`, 'INVENTORY', targetItem?.store_id);
     showToast('Perubahan Disimpan', 'Data komponen iPhone berhasil diupdate.', 'success');
   };

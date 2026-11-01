@@ -276,6 +276,19 @@ export const InventoryPage: React.FC = () => {
     });
   };
 
+  // Check if current Kode Barang in form is already used by another component in the active store
+  const duplicateCodeItem = useMemo(() => {
+    const trimmedCode = itemForm.kode_barang.trim().toLowerCase();
+    if (!trimmedCode) return null;
+    return (
+      storeInventory.find(
+        (item) =>
+          item.kode_barang.trim().toLowerCase() === trimmedCode &&
+          (!itemEditing || item.id !== itemEditing.id)
+      ) || null
+    );
+  }, [storeInventory, itemForm.kode_barang, itemEditing]);
+
   // Handle Open Add Component
   const handleOpenAddComponent = () => {
     if (isKaryawan) {
@@ -284,8 +297,15 @@ export const InventoryPage: React.FC = () => {
     }
     setItemEditing(null);
     const targetModel = selectedSeries ? selectedSeries.nama_seri : (storeIphoneSeries[0]?.nama_seri || '');
+    const existingCodes = new Set(storeInventory.map((i) => i.kode_barang.trim().toLowerCase()));
+    let generatedCode = `CMP-${Math.floor(100 + Math.random() * 900)}`;
+    let attempts = 0;
+    while (existingCodes.has(generatedCode.toLowerCase()) && attempts < 50) {
+      generatedCode = `CMP-${Math.floor(100 + Math.random() * 900)}`;
+      attempts++;
+    }
     setItemForm({
-      kode_barang: `CMP-${Math.floor(100 + Math.random() * 900)}`,
+      kode_barang: generatedCode,
       nama_barang: '',
       model_iphone: targetModel,
       harga_beli: 350000,
@@ -339,6 +359,24 @@ export const InventoryPage: React.FC = () => {
       showToast(
         'Kategori Komponen Belum Ada',
         'Silakan buat Kategori Sparepart terlebih dahulu di menu Kategori Sparepart sebelum menambahkan komponen.',
+        'warning'
+      );
+      return;
+    }
+
+    if (!itemForm.kode_barang.trim()) {
+      showToast(
+        'Kode Barang Kosong',
+        'Silakan isi kode barang terlebih dahulu.',
+        'warning'
+      );
+      return;
+    }
+
+    if (duplicateCodeItem) {
+      showToast(
+        'Kode Barang Sudah Digunakan',
+        `Kode barang "${itemForm.kode_barang.trim()}" sudah digunakan oleh komponen "${duplicateCodeItem.nama_barang}" (${duplicateCodeItem.model_iphone}). Silakan gunakan kode barang lain.`,
         'warning'
       );
       return;
@@ -1427,7 +1465,11 @@ export const InventoryPage: React.FC = () => {
                       type="text"
                       value={itemForm.kode_barang}
                       onChange={(e) => setItemForm({ ...itemForm, kode_barang: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 font-mono font-medium text-slate-800 focus:outline-none focus:border-blue-600"
+                      className={`w-full px-3 py-2 rounded-xl border font-mono font-medium focus:outline-none ${
+                        duplicateCodeItem
+                          ? 'border-rose-400 bg-rose-50/40 text-rose-700 focus:border-rose-600'
+                          : 'border-slate-200 text-slate-800 focus:border-blue-600'
+                      }`}
                       required
                     />
                   </div>
@@ -1445,6 +1487,16 @@ export const InventoryPage: React.FC = () => {
                     />
                   </div>
                 </div>
+
+                {duplicateCodeItem && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 flex items-start gap-2.5 text-rose-700">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <p className="text-[11px] leading-relaxed font-medium">
+                      Kode barang <strong>&ldquo;{itemForm.kode_barang.trim()}&rdquo;</strong> sudah digunakan oleh komponen{' '}
+                      <strong>{duplicateCodeItem.nama_barang}</strong> ({duplicateCodeItem.model_iphone}). Silakan gunakan kode barang lain yang belum terpakai.
+                    </p>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
