@@ -2208,6 +2208,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Akses Ditolak', 'Role Karyawan tidak memiliki hak untuk menambahkan master komponen baru.', 'error');
       return;
     }
+    if (!data.model_iphone || !data.model_iphone.trim()) {
+      showToast('Seri iPhone Belum Dipilih', 'Silakan buat atau pilih Seri iPhone terlebih dahulu sebelum menambahkan komponen.', 'warning');
+      return;
+    }
+    if (!data.category_id || !data.category_id.trim()) {
+      showToast('Kategori Komponen Belum Ada', 'Silakan buat Kategori Sparepart terlebih dahulu di menu Kategori Sparepart sebelum menambahkan komponen.', 'warning');
+      return;
+    }
     const id = `inv-${Date.now()}`;
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
@@ -2224,6 +2232,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setInventory((prev) => [newItem, ...prev]);
+
+    fetch('/api/inventory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newItem),
+    }).catch(() => {});
 
     // If initial stock > 0, create transaction
     if (data.stok > 0 && currentUser) {
@@ -2251,6 +2265,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         created_at: `${dateStr} ${timeStr}`,
       };
       setTransactions((prev) => [initTrx, ...prev]);
+      fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(initTrx),
+      }).catch(() => {});
     }
 
     logActivity('Tambah Komponen iPhone', `Menambahkan ${newItem.kode_barang} - ${newItem.nama_barang} (${newItem.model_iphone}) [Stok: ${newItem.stok}]`, 'INVENTORY', data.store_id);
@@ -2263,6 +2282,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Akses Ditolak', 'Role Karyawan tidak memiliki hak untuk mengedit data master komponen.', 'error');
       return;
     }
+    if (data.category_id !== undefined && !data.category_id.trim()) {
+      showToast('Kategori Komponen Belum Ada', 'Kategori komponen tidak boleh kosong.', 'warning');
+      return;
+    }
     setInventory((prev) =>
       prev.map((item) => {
         if (item.id === id) {
@@ -2270,6 +2293,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.stok !== undefined || data.stok_minimum !== undefined) {
             updated.status = calculateStockStatus(updated.stok, updated.stok_minimum);
           }
+          fetch('/api/inventory', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updated),
+          }).catch(() => {});
           return updated;
         }
         return item;

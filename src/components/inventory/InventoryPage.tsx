@@ -325,7 +325,33 @@ export const InventoryPage: React.FC = () => {
   const handleSaveComponent = (e: React.FormEvent) => {
     e.preventDefault();
     if (isKaryawan) return;
-    if (!itemForm.nama_barang.trim()) return;
+
+    if (!itemForm.model_iphone || !itemForm.model_iphone.trim()) {
+      showToast(
+        'Seri iPhone Belum Dipilih',
+        'Silakan buat atau pilih Katalog Seri iPhone terlebih dahulu sebelum menyimpan komponen.',
+        'warning'
+      );
+      return;
+    }
+
+    if (!itemForm.category_id || !itemForm.category_id.trim()) {
+      showToast(
+        'Kategori Komponen Belum Ada',
+        'Silakan buat Kategori Sparepart terlebih dahulu di menu Kategori Sparepart sebelum menambahkan komponen.',
+        'warning'
+      );
+      return;
+    }
+
+    if (!itemForm.nama_barang.trim()) {
+      showToast(
+        'Nama Komponen Kosong',
+        'Silakan isi nama komponen terlebih dahulu.',
+        'warning'
+      );
+      return;
+    }
 
     if (itemEditing) {
       updateInventoryItem(itemEditing.id, {
@@ -1333,6 +1359,21 @@ export const InventoryPage: React.FC = () => {
 
             <form onSubmit={handleSaveComponent} className="flex flex-col flex-1 min-h-0">
               <div className="overflow-y-auto flex-1 px-5 sm:px-6 py-5 space-y-4 text-xs">
+                {(storeCategories.length === 0 || storeIphoneSeries.length === 0) && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-amber-800">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1 text-[11px] leading-relaxed">
+                      <p className="font-bold text-amber-900">Perhatian Sebelum Menambah Komponen:</p>
+                      {storeIphoneSeries.length === 0 && (
+                        <p>• Belum ada <strong>Seri iPhone</strong> untuk cabang ini. Silakan buat melalui tombol <strong>Katalog Seri</strong> terlebih dahulu.</p>
+                      )}
+                      {storeCategories.length === 0 && (
+                        <p>• Belum ada <strong>Kategori Komponen</strong> untuk cabang ini. Silakan buat kategori terlebih dahulu di menu <strong>Kategori Sparepart</strong>.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">
@@ -1341,7 +1382,9 @@ export const InventoryPage: React.FC = () => {
                     <select
                       value={itemForm.model_iphone}
                       onChange={(e) => setItemForm({ ...itemForm, model_iphone: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 font-medium text-slate-800 focus:outline-none focus:border-blue-600 bg-white"
+                      className={`w-full px-3 py-2 rounded-xl border font-medium text-slate-800 focus:outline-none focus:border-blue-600 bg-white ${
+                        !itemForm.model_iphone ? 'border-amber-300 bg-amber-50/30 text-amber-800' : 'border-slate-200'
+                      }`}
                     >
                       {storeIphoneSeries.length === 0 && (
                         <option value="">-- Belum ada seri iPhone (buat seri dulu) --</option>
@@ -1361,7 +1404,9 @@ export const InventoryPage: React.FC = () => {
                     <select
                       value={itemForm.category_id}
                       onChange={(e) => setItemForm({ ...itemForm, category_id: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 font-medium text-slate-800 focus:outline-none focus:border-blue-600 bg-white"
+                      className={`w-full px-3 py-2 rounded-xl border font-medium text-slate-800 focus:outline-none focus:border-blue-600 bg-white ${
+                        !itemForm.category_id ? 'border-amber-300 bg-amber-50/30 text-amber-800' : 'border-slate-200'
+                      }`}
                     >
                       {storeCategories.length === 0 && (
                         <option value="">-- Belum ada kategori (buat kategori dulu) --</option>
