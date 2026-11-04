@@ -50,9 +50,104 @@ export const InventoryPage: React.FC = () => {
 
   const isKaryawan = currentUser?.role === 'KARYAWAN';
 
+  // Storage keys scoped per store so refreshing the browser stays inside the active series catalog or table view
+  const viewModeStorageKey = `iphone_pos_inv_view_mode_v1_${activeStoreId || 'global'}`;
+  const selectedSeriesStorageKey = `iphone_pos_inv_selected_series_v1_${activeStoreId || 'global'}`;
+
   // Navigation Level: 'SERIES_LIST' (Level 1) vs 'SERIES_COMPONENTS' (Level 2) vs 'ALL_TABLE' (Flat Table)
-  const [viewMode, setViewMode] = useState<'SERIES_LIST' | 'ALL_TABLE'>('SERIES_LIST');
-  const [selectedSeries, setSelectedSeries] = useState<IPhoneSeries | null>(null);
+  const [viewMode, setViewModeState] = useState<'SERIES_LIST' | 'ALL_TABLE'>(() => {
+    try {
+      const saved = sessionStorage.getItem(`iphone_pos_inv_view_mode_v1_${activeStoreId || 'global'}`);
+      if (saved === 'ALL_TABLE' || saved === 'SERIES_LIST') return saved;
+    } catch {}
+    return 'SERIES_LIST';
+  });
+
+  const [selectedSeries, setSelectedSeriesState] = useState<IPhoneSeries | null>(() => {
+    try {
+      const savedRaw = sessionStorage.getItem(`iphone_pos_inv_selected_series_v1_${activeStoreId || 'global'}`);
+      if (savedRaw) {
+        const parsed = JSON.parse(savedRaw) as IPhoneSeries;
+        if (parsed && parsed.id && parsed.nama_seri) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return null;
+  });
+
+  const setViewMode = (mode: 'SERIES_LIST' | 'ALL_TABLE') => {
+    setViewModeState(mode);
+    try {
+      sessionStorage.setItem(viewModeStorageKey, mode);
+    } catch {}
+  };
+
+  const setSelectedSeries = (
+    value: IPhoneSeries | null | ((prev: IPhoneSeries | null) => IPhoneSeries | null)
+  ) => {
+    setSelectedSeriesState((prev) => {
+      const next = typeof value === 'function' ? value(prev) : value;
+      try {
+        if (next) {
+          sessionStorage.setItem(selectedSeriesStorageKey, JSON.stringify(next));
+        } else {
+          sessionStorage.removeItem(selectedSeriesStorageKey);
+        }
+      } catch {}
+      return next;
+    });
+  };
+
+  // Restore saved viewMode and selectedSeries when switching activeStoreId
+  useEffect(() => {
+    try {
+      const savedMode = sessionStorage.getItem(viewModeStorageKey);
+      if (savedMode === 'ALL_TABLE' || savedMode === 'SERIES_LIST') {
+        setViewModeState(savedMode);
+      } else {
+        setViewModeState('SERIES_LIST');
+      }
+
+      const savedSeriesRaw = sessionStorage.getItem(selectedSeriesStorageKey);
+      if (savedSeriesRaw) {
+        const parsed = JSON.parse(savedSeriesRaw) as IPhoneSeries;
+        if (parsed && parsed.id && (!activeStoreId || !parsed.store_id || parsed.store_id === activeStoreId)) {
+          setSelectedSeriesState(parsed);
+          return;
+        }
+      }
+      setSelectedSeriesState(null);
+    } catch {
+      setSelectedSeriesState(null);
+    }
+  }, [activeStoreId, viewModeStorageKey, selectedSeriesStorageKey]);
+
+  // Keep selectedSeries synchronized with live iphoneSeries data from MySQL
+  useEffect(() => {
+    if (!selectedSeries || iphoneSeries.length === 0) return;
+    const storeList = activeStoreId
+      ? iphoneSeries.filter((s) => s.store_id === activeStoreId)
+      : iphoneSeries;
+    if (storeList.length === 0) return;
+
+    const liveMatch =
+      storeList.find((s) => s.id === selectedSeries.id) ||
+      storeList.find(
+        (s) => s.nama_seri.trim().toLowerCase() === selectedSeries.nama_seri.trim().toLowerCase()
+      );
+
+    if (liveMatch) {
+      if (
+        liveMatch.id !== selectedSeries.id ||
+        liveMatch.nama_seri !== selectedSeries.nama_seri ||
+        liveMatch.tahun_rilis !== selectedSeries.tahun_rilis ||
+        liveMatch.deskripsi !== selectedSeries.deskripsi
+      ) {
+        setSelectedSeries(liveMatch);
+      }
+    }
+  }, [iphoneSeries, activeStoreId]);
 
   // Search & Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -68,7 +163,7 @@ export const InventoryPage: React.FC = () => {
       }
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
-  }, [selectedSeries]);
+  }, [selectedSeries?.id]);
 
   // Modals
   const [isSeriesModalOpen, setIsSeriesModalOpen] = useState(false);

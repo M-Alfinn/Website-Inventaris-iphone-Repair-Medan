@@ -145,7 +145,8 @@ export async function initializeDatabaseIfEmpty(): Promise<boolean> {
     const status = await checkDbConnection();
     if (!status.connected) return false;
 
-    if (status.tablesCount === 0 || !status.tables?.['inventory']) {
+    const existingTableNames = status.tables ? Object.keys(status.tables) : [];
+    if (status.tablesCount === 0 || !existingTableNames.includes('users') || !existingTableNames.includes('stores')) {
       const sqlPath = path.resolve(__dirname, 'database.sql');
       if (fs.existsSync(sqlPath)) {
         const sqlContent = fs.readFileSync(sqlPath, 'utf8');
@@ -159,6 +160,10 @@ export async function initializeDatabaseIfEmpty(): Promise<boolean> {
         try {
           await conn.query('SET FOREIGN_KEY_CHECKS = 0');
           for (const statement of statements) {
+            // Jangan pernah menjalankan DROP TABLE jika tabel sudah ada di database
+            if (existingTableNames.length > 0 && /^DROP\s+TABLE/i.test(statement)) {
+              continue;
+            }
             try {
               await conn.query(statement);
             } catch {
@@ -208,9 +213,36 @@ export async function fetchAllDataFromMySQL(): Promise<any | null> {
         : [];
       const [categories] = await conn.query('SELECT * FROM categories ORDER BY id ASC');
       const [iphoneSeries] = await conn.query('SELECT * FROM iphone_series ORDER BY urutan ASC, id ASC');
-      const [inventory] = await conn.query('SELECT * FROM inventory ORDER BY store_id ASC, category_id ASC, kode_barang ASC');
-      const [transactions] = await conn.query('SELECT * FROM stock_transactions ORDER BY tanggal DESC, waktu DESC, id DESC LIMIT 500');
-      const [returnsData] = await conn.query('SELECT * FROM returns ORDER BY tanggal_pengajuan DESC, id DESC');
+      const [inventoryRaw]: any = await conn.query('SELECT * FROM inventory ORDER BY store_id ASC, category_id ASC, kode_barang ASC');
+      const inventory = Array.isArray(inventoryRaw)
+        ? inventoryRaw.map((inv: any) => ({
+            ...inv,
+            stok: Number(inv.stok ?? 0),
+            stok_minimum: Number(inv.stok_minimum ?? 5),
+            harga_beli: Number(inv.harga_beli ?? 0),
+            harga_jual: Number(inv.harga_jual ?? 0),
+          }))
+        : [];
+      const [transactionsRaw]: any = await conn.query('SELECT * FROM stock_transactions ORDER BY tanggal DESC, waktu DESC, id DESC LIMIT 500');
+      const transactions = Array.isArray(transactionsRaw)
+        ? transactionsRaw.map((trx: any) => ({
+            ...trx,
+            jumlah: Number(trx.jumlah ?? 0),
+            stok_sebelum: Number(trx.stok_sebelum ?? 0),
+            stok_sesudah: Number(trx.stok_sesudah ?? 0),
+            harga_beli: Number(trx.harga_beli ?? 0),
+            harga_jual: Number(trx.harga_jual ?? 0),
+          }))
+        : [];
+      const [returnsRaw]: any = await conn.query('SELECT * FROM returns ORDER BY tanggal_pengajuan DESC, id DESC');
+      const returnsData = Array.isArray(returnsRaw)
+        ? returnsRaw.map((ret: any) => ({
+            ...ret,
+            jumlah: Number(ret.jumlah ?? 0),
+            harga_beli: Number(ret.harga_beli ?? 0),
+            harga_jual: Number(ret.harga_jual ?? 0),
+          }))
+        : [];
       const [attendance] = await conn.query('SELECT * FROM attendance ORDER BY tanggal DESC, jam_masuk DESC, id DESC LIMIT 500');
       // Pembersihan otomatis: Hapus log anomali mutasi barang/perbaikan atas nama Karyawan dan perbaiki tipe 'log'
       try {
@@ -297,16 +329,21 @@ export async function fetchAllDataFromMySQL(): Promise<any | null> {
  */
 export async function upsertRecord(table: string, data: Record<string, any>, primaryKey = 'id'): Promise<boolean> {
   try {
-    const status = await checkDbConnection();
-    if (!status.connected) {
-      return false;
+    if (!currentStatus.connected) {
+      const status = await checkDbConnection();
+      if (!status.connected) {
+        return false;
+      }
     }
 
     const currentPool = getDbPool();
     const keys = Object.keys(data);
     const values = keys.map((k) => (data[k] === undefined ? null : data[k]));
     const placeholders = keys.map(() => '?').join(', ');
-    const updateClauses = keys.map((k) => `\`${k}\` = VALUES(\`${k}\`)`).join(', ');
+    const updateKeys = keys.filter((k) => k !== primaryKey);
+    const updateClauses = (updateKeys.length > 0 ? updateKeys : keys)
+      .map((k) => `\`${k}\` = VALUES(\`${k}\`)`)
+      .join(', ');
 
     const query = `
       INSERT INTO \`${table}\` (${keys.map((k) => `\`${k}\``).join(', ')})
@@ -314,8 +351,21 @@ export async function upsertRecord(table: string, data: Record<string, any>, pri
       ON DUPLICATE KEY UPDATE ${updateClauses}
     `;
 
-    await currentPool.query(query, values);
-    return true;
+    try {
+      await currentPool.query(query, values);
+      return true;
+    } catch (innerErr: any) {
+      // Fallback: jika terkendala urutan foreign key pada request paralel, jalankan dengan FOREIGN_KEY_CHECKS = 0
+      const conn = await currentPool.getConnection();
+      try {
+        await conn.query('SET FOREIGN_KEY_CHECKS = 0');
+        await conn.query(query, values);
+        await conn.query('SET FOREIGN_KEY_CHECKS = 1');
+        return true;
+      } finally {
+        conn.release();
+      }
+    }
   } catch (err: any) {
     console.error(`[MySQL Upsert Error on "${table}"]:`, err?.message || err);
     return false;

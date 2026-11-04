@@ -673,21 +673,32 @@ app.delete('/api/iphone-series/:id', async (req, res) => {
 // Inventory
 app.post('/api/inventory', async (req, res) => {
   const item = req.body;
-  const ok = await upsertRecord('inventory', {
+  const record = {
     id: item.id,
     store_id: item.store_id,
     category_id: item.category_id,
     kode_barang: item.kode_barang,
     nama_barang: item.nama_barang,
     model_iphone: item.model_iphone,
-    harga_beli: item.harga_beli || 0,
-    harga_jual: item.harga_jual || 0,
-    stok: item.stok || 0,
-    stok_minimum: item.stok_minimum || 5,
+    harga_beli: Number(item.harga_beli ?? 0),
+    harga_jual: Number(item.harga_jual ?? 0),
+    stok: Number(item.stok ?? 0),
+    stok_minimum: Number(item.stok_minimum ?? 5),
     satuan: item.satuan || 'pcs',
     keterangan: item.keterangan || '',
     status: item.status || 'AMAN',
-  });
+  };
+  try {
+    if (inMemoryBackup && Array.isArray(inMemoryBackup.inventory)) {
+      const idx = inMemoryBackup.inventory.findIndex((i: any) => i.id === record.id);
+      if (idx >= 0) {
+        inMemoryBackup.inventory[idx] = { ...inMemoryBackup.inventory[idx], ...record };
+      } else {
+        inMemoryBackup.inventory.unshift(record);
+      }
+    }
+  } catch {}
+  const ok = await upsertRecord('inventory', record);
   res.json({ success: ok });
 });
 
@@ -714,27 +725,36 @@ app.delete('/api/inventory/:id', async (req, res) => {
 // Transactions
 app.post('/api/transactions', async (req, res) => {
   const trx = req.body;
-  const ok = await upsertRecord('stock_transactions', {
+  const record = {
     id: trx.id,
     store_id: trx.store_id,
     inventory_id: trx.inventory_id,
     kode_barang: trx.kode_barang,
     nama_barang: trx.nama_barang,
     model_iphone: trx.model_iphone || '',
-    harga_beli: trx.harga_beli || 0,
-    harga_jual: trx.harga_jual || 0,
+    harga_beli: Number(trx.harga_beli ?? 0),
+    harga_jual: Number(trx.harga_jual ?? 0),
     jenis: trx.jenis,
     direction: trx.direction,
-    jumlah: trx.jumlah,
-    stok_sebelum: trx.stok_sebelum,
-    stok_sesudah: trx.stok_sesudah,
+    jumlah: Number(trx.jumlah ?? 0),
+    stok_sebelum: Number(trx.stok_sebelum ?? 0),
+    stok_sesudah: Number(trx.stok_sesudah ?? 0),
     alasan: trx.alasan,
     keterangan: trx.keterangan || '',
     tanggal: trx.tanggal,
     waktu: trx.waktu,
     user_id: trx.user_id,
     user_name: trx.user_name,
-  });
+  };
+  try {
+    if (inMemoryBackup && Array.isArray(inMemoryBackup.transactions)) {
+      const exists = inMemoryBackup.transactions.some((t: any) => t.id === record.id);
+      if (!exists) {
+        inMemoryBackup.transactions.unshift(record);
+      }
+    }
+  } catch {}
+  const ok = await upsertRecord('stock_transactions', record);
   res.json({ success: ok });
 });
 
@@ -759,16 +779,16 @@ app.delete('/api/transactions/:id', async (req, res) => {
 // Returns
 app.post('/api/returns', async (req, res) => {
   const ret = req.body;
-  const ok = await upsertRecord('returns', {
+  const record = {
     id: ret.id,
     store_id: ret.store_id,
     inventory_id: ret.inventory_id,
     kode_barang: ret.kode_barang,
     nama_barang: ret.nama_barang,
     model_iphone: ret.model_iphone || '',
-    harga_beli: ret.harga_beli || 0,
-    harga_jual: ret.harga_jual || 0,
-    jumlah: ret.jumlah,
+    harga_beli: Number(ret.harga_beli ?? 0),
+    harga_jual: Number(ret.harga_jual ?? 0),
+    jumlah: Number(ret.jumlah ?? 0),
     tanggal_return: ret.tanggal_return || ret.tanggal_pengajuan,
     tanggal_pengajuan: ret.tanggal_pengajuan || ret.tanggal_return,
     customer_name: ret.customer_name || '',
@@ -784,7 +804,18 @@ app.post('/api/returns', async (req, res) => {
     diproses_oleh_id: ret.diproses_oleh_id || null,
     diproses_oleh_name: ret.diproses_oleh_name || null,
     tanggal_proses: ret.tanggal_proses || null,
-  });
+  };
+  try {
+    if (inMemoryBackup && Array.isArray(inMemoryBackup.returns)) {
+      const idx = inMemoryBackup.returns.findIndex((r: any) => r.id === record.id);
+      if (idx >= 0) {
+        inMemoryBackup.returns[idx] = { ...inMemoryBackup.returns[idx], ...record };
+      } else {
+        inMemoryBackup.returns.unshift(record);
+      }
+    }
+  } catch {}
+  const ok = await upsertRecord('returns', record);
   res.json({ success: ok });
 });
 
@@ -812,7 +843,7 @@ app.post('/api/attendance', async (req, res) => {
   if (att.user_id === 'user-super' || att.user_name?.toLowerCase().includes('super admin')) {
     return res.json({ success: true, message: 'Super admin tidak memiliki absensi' });
   }
-  const ok = await upsertRecord('attendance', {
+  const record = {
     id: att.id,
     user_id: att.user_id,
     user_name: att.user_name,
@@ -825,7 +856,18 @@ app.post('/api/attendance', async (req, res) => {
     status: att.status,
     catatan: att.catatan || att.keterangan || '',
     keterangan: att.keterangan || att.catatan || '',
-  });
+  };
+  try {
+    if (inMemoryBackup && Array.isArray(inMemoryBackup.attendance)) {
+      const idx = inMemoryBackup.attendance.findIndex((a: any) => a.id === record.id);
+      if (idx >= 0) {
+        inMemoryBackup.attendance[idx] = { ...inMemoryBackup.attendance[idx], ...record };
+      } else {
+        inMemoryBackup.attendance.unshift(record);
+      }
+    }
+  } catch {}
+  const ok = await upsertRecord('attendance', record);
   res.json({ success: ok });
 });
 
@@ -845,7 +887,7 @@ app.delete('/api/attendance/:id', async (req, res) => {
 // Stores
 app.post('/api/stores', async (req, res) => {
   const s = req.body;
-  const ok = await upsertRecord('stores', {
+  const record = {
     id: s.id,
     nama_toko: s.nama_toko,
     cabang: s.cabang,
@@ -858,7 +900,18 @@ app.post('/api/stores', async (req, res) => {
     jam_pulang_standar: s.jam_pulang_standar || '17:00',
     toleransi_keterlambatan_menit: s.toleransi_keterlambatan_menit || 0,
     foto_profil: s.foto_profil || null,
-  });
+  };
+  try {
+    if (inMemoryBackup && Array.isArray(inMemoryBackup.stores)) {
+      const idx = inMemoryBackup.stores.findIndex((st: any) => st.id === record.id);
+      if (idx >= 0) {
+        inMemoryBackup.stores[idx] = { ...inMemoryBackup.stores[idx], ...record };
+      } else {
+        inMemoryBackup.stores.push(record);
+      }
+    }
+  } catch {}
+  const ok = await upsertRecord('stores', record);
   res.json({ success: ok });
 });
 

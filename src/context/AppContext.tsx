@@ -343,7 +343,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isRemoteSyncRef = useRef(false);
   const isInitialLoadCompleteRef = useRef(false);
+  const lastLocalMutationTimeRef = useRef<number>(0);
   const recentlyModifiedUsersRef = useRef<Record<string, { user: User; timestamp: number }>>({});
+  const recentlyModifiedInventoryRef = useRef<Record<string, { item: InventoryItem; timestamp: number }>>({});
+  const recentlyAddedTransactionsRef = useRef<Record<string, { trx: StockTransaction; timestamp: number }>>({});
+
+  const markLocalMutation = () => {
+    lastLocalMutationTimeRef.current = Date.now();
+  };
+
+  const mergeServerInventoryWithLocalPending = (serverItems: any[]): InventoryItem[] => {
+    const now = Date.now();
+    const merged = serverItems.map((rawItem: any) => {
+      const normalized: InventoryItem = {
+        ...rawItem,
+        stok: Number(rawItem.stok ?? 0),
+        stok_minimum: Number(rawItem.stok_minimum ?? 5),
+        harga_beli: Number(rawItem.harga_beli ?? 0),
+        harga_jual: Number(rawItem.harga_jual ?? 0),
+      };
+      const pending = recentlyModifiedInventoryRef.current[normalized.id];
+      if (pending && now - pending.timestamp < 12000) {
+        return {
+          ...normalized,
+          ...pending.item,
+          stok: Number(pending.item.stok ?? 0),
+          stok_minimum: Number(pending.item.stok_minimum ?? 5),
+          harga_beli: Number(pending.item.harga_beli ?? 0),
+          harga_jual: Number(pending.item.harga_jual ?? 0),
+        };
+      }
+      return normalized;
+    });
+
+    // Preserve newly added items that are still within the 12-second window
+    const existingIds = new Set(merged.map((i) => i.id));
+    Object.keys(recentlyModifiedInventoryRef.current).forEach((key) => {
+      const entry = recentlyModifiedInventoryRef.current[key];
+      if (entry && now - entry.timestamp < 12000 && !existingIds.has(entry.item.id)) {
+        merged.unshift(entry.item);
+        existingIds.add(entry.item.id);
+      }
+    });
+
+    return merged;
+  };
+
+  const mergeServerTransactionsWithLocalPending = (serverTrx: any[]): StockTransaction[] => {
+    const now = Date.now();
+    const normalizedList: StockTransaction[] = serverTrx.map((rawTrx: any) => ({
+      ...rawTrx,
+      jumlah: Number(rawTrx.jumlah ?? 0),
+      stok_sebelum: Number(rawTrx.stok_sebelum ?? 0),
+      stok_sesudah: Number(rawTrx.stok_sesudah ?? 0),
+      harga_beli: Number(rawTrx.harga_beli ?? 0),
+      harga_jual: Number(rawTrx.harga_jual ?? 0),
+    }));
+
+    const existingIds = new Set(normalizedList.map((t) => t.id));
+    const pendingToPrepend: StockTransaction[] = [];
+    Object.keys(recentlyAddedTransactionsRef.current).forEach((key) => {
+      const entry = recentlyAddedTransactionsRef.current[key];
+      if (entry && now - entry.timestamp < 12000 && !existingIds.has(entry.trx.id)) {
+        pendingToPrepend.push(entry.trx);
+        existingIds.add(entry.trx.id);
+      }
+    });
+
+    return [...pendingToPrepend, ...normalizedList];
+  };
 
   const mergeServerUsersWithLocalPending = (serverUsers: any[]): User[] => {
     const now = Date.now();
@@ -364,6 +432,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const persistUserToBackend = (userObj: User) => {
+    markLocalMutation();
     const normalized = normalizeUserRecord(userObj);
     recentlyModifiedUsersRef.current[normalized.id] = {
       user: normalized,
@@ -669,11 +738,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             categories,
             iphoneSeries,
             inventory,
-            transactions,
+            transactions: transactions.slice(0, 50),
             returns,
-            attendance,
-            activityLogs,
-            notifications,
+            attendance: attendance.slice(0, 50),
+            activityLogs: activityLogs.slice(0, 50),
+            notifications: notifications.slice(0, 50),
             callerRole: activeUser.role,
             callerUserId: activeUser.id,
           }),
@@ -786,8 +855,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 store_id: s.store_id || firstStoreId,
               })));
             }
-            if (Array.isArray(d.inventory)) setInventory(d.inventory);
-            if (Array.isArray(d.transactions)) setTransactions(d.transactions);
+            if (Array.isArray(d.inventory)) setInventory(mergeServerInventoryWithLocalPending(d.inventory));
+            if (Array.isArray(d.transactions)) setTransactions(mergeServerTransactionsWithLocalPending(d.transactions));
             if (Array.isArray(d.returns)) {
               setReturns(d.returns.map((r: any) => ({
                 ...r,
@@ -823,14 +892,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 1. Silent background polling every 2.5 seconds to sync data across devices (runs both when logged in and on login screen)
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && !document.hidden) {
-        fetchDataFromMySQL().catch(() => {});
+        fetchDataFromMySQL(true).catch(() => {});
       }
     }, 2500);
 
     // 2. Fetch immediately when user focuses the tab or returns to the window
     const handleFocus = () => {
       if (typeof document !== 'undefined' && !document.hidden) {
-        fetchDataFromMySQL().catch(() => {});
+        fetchDataFromMySQL(true).catch(() => {});
       }
     };
 
@@ -974,6 +1043,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       tipe,
     };
     setActivityLogs((prev) => [newLog, ...sanitizeActivityLogs(prev)]);
+    fetch('/api/activity-logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newLog),
+    }).catch(() => {});
   };
 
   const addNotification = (
@@ -1024,6 +1098,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: new Date().toISOString(),
     };
     setNotifications((prev) => [newNotif, ...prev]);
+    fetch('/api/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newNotif),
+    }).catch(() => {});
   };
 
   // Auth Functions
@@ -2018,20 +2097,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    const currentStock = item.stok;
+    const currentStock = Number(item.stok ?? 0);
+    const numericAmount = Number(amount ?? 0);
     let newStock = currentStock;
 
     if (direction === '+') {
-      newStock = currentStock + amount;
+      newStock = currentStock + numericAmount;
     } else {
-      if (currentStock < amount) {
-        showToast('Stok Tidak Cukup', `Stok saat ini (${currentStock} ${item.satuan}) tidak mencukupi untuk pengurangan ${amount} ${item.satuan}.`, 'error');
+      if (currentStock < numericAmount) {
+        showToast('Stok Tidak Cukup', `Stok saat ini (${currentStock} ${item.satuan}) tidak mencukupi untuk pengurangan ${numericAmount} ${item.satuan}.`, 'error');
         return false;
       }
-      newStock = currentStock - amount;
+      newStock = currentStock - numericAmount;
     }
 
-    const newStatus = calculateStockStatus(newStock, item.stok_minimum);
+    const newStatus = calculateStockStatus(newStock, Number(item.stok_minimum ?? 5));
     const now = new Date();
     const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
       now.getDate()
@@ -2041,18 +2121,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       '0'
     )}:${String(now.getSeconds()).padStart(2, '0')}`;
 
-    // Update Inventory
+    const updatedItem: InventoryItem = {
+      ...item,
+      stok: newStock,
+      status: newStatus,
+      updated_at: dateStr,
+    };
+
+    markLocalMutation();
+    recentlyModifiedInventoryRef.current[item.id] = {
+      item: updatedItem,
+      timestamp: Date.now(),
+    };
+
+    // Update Inventory state
     setInventory((prev) =>
-      prev.map((it) =>
-        it.id === inventoryId
-          ? {
-              ...it,
-              stok: newStock,
-              status: newStatus,
-              updated_at: dateStr,
-            }
-          : it
-      )
+      prev.map((it) => (it.id === inventoryId ? updatedItem : it))
     );
 
     // Transaction Type
@@ -2067,11 +2151,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       kode_barang: item.kode_barang,
       nama_barang: item.nama_barang,
       model_iphone: item.model_iphone,
-      harga_beli: item.harga_beli,
-      harga_jual: item.harga_jual,
+      harga_beli: Number(item.harga_beli ?? 0),
+      harga_jual: Number(item.harga_jual ?? 0),
       jenis: computedTrxType,
       direction,
-      jumlah: amount,
+      jumlah: numericAmount,
       stok_sebelum: currentStock,
       stok_sesudah: newStock,
       alasan: reason,
@@ -2082,7 +2166,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       user_name: currentUser.nama || currentUser.name,
       created_at: `${dateStr} ${timeStr}`,
     };
+    recentlyAddedTransactionsRef.current[newTrx.id] = {
+      trx: newTrx,
+      timestamp: Date.now(),
+    };
     setTransactions((prev) => [newTrx, ...prev]);
+
+    // Immediately persist updated inventory item & new stock transaction to MySQL
+    fetch('/api/inventory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedItem),
+    }).catch(() => {});
+
+    fetch('/api/transactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newTrx),
+    }).catch(() => {});
 
     // Log Activity with contextual activity title and detailed message
     let activityTitle = direction === '+' ? 'Tambah Stok Barang' : 'Kurangi Stok Barang';
@@ -2243,6 +2344,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updated_at: dateStr,
     };
 
+    markLocalMutation();
+    recentlyModifiedInventoryRef.current[newItem.id] = {
+      item: newItem,
+      timestamp: Date.now(),
+    };
+
     setInventory((prev) => [newItem, ...prev]);
 
     fetch('/api/inventory', {
@@ -2275,6 +2382,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         user_id: currentUser.id,
         user_name: currentUser.nama || currentUser.name,
         created_at: `${dateStr} ${timeStr}`,
+      };
+      recentlyAddedTransactionsRef.current[initTrx.id] = {
+        trx: initTrx,
+        timestamp: Date.now(),
       };
       setTransactions((prev) => [initTrx, ...prev]);
       fetch('/api/transactions', {
@@ -2316,6 +2427,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return;
       }
     }
+    markLocalMutation();
     setInventory((prev) =>
       prev.map((item) => {
         if (item.id === id) {
@@ -2323,6 +2435,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.stok !== undefined || data.stok_minimum !== undefined) {
             updated.status = calculateStockStatus(updated.stok, updated.stok_minimum);
           }
+          recentlyModifiedInventoryRef.current[updated.id] = {
+            item: updated,
+            timestamp: Date.now(),
+          };
           fetch('/api/inventory', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2346,13 +2462,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const item = inventory.find((i) => i.id === id);
     if (!item) return;
 
+    markLocalMutation();
+    delete recentlyModifiedInventoryRef.current[id];
+
     try {
       await fetch(`/api/inventory/${id}`, { method: 'DELETE' });
     } catch {}
 
     setInventory((prev) => prev.filter((i) => i.id !== id));
     logActivity('Hapus Barang', `Menghapus ${item.kode_barang} - ${item.nama_barang} (${item.model_iphone})`, 'INVENTORY', item.store_id);
-    showToast('Barang Dihapus', `${item.nama_barang} telah dihapus dari inventaris.`, 'info');
+    showToast('Barang Dihapus', `${item.nama_barang} telah dihapus dari inventaris dan database.`, 'info');
   };
 
   // Categories
@@ -2553,7 +2672,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: new Date().toLocaleString(),
     };
 
+    markLocalMutation();
     setReturns((prev) => [newReturn, ...prev]);
+    fetch('/api/returns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newReturn),
+    }).catch(() => {});
     logActivity('Buat Return Barang', `Mengajukan return ${amount} pcs ${item.nama_barang} (${item.model_iphone}) [${reason}]`, 'RETURN', item.store_id);
     
     // Notification for Admins needing approval
@@ -2632,6 +2757,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: new Date().toLocaleString(),
     };
 
+    markLocalMutation();
+
     if (isSuper) {
       adjustStock(
         item.id,
@@ -2642,12 +2769,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         'RETURN_MASUK'
       );
       setReturns((prev) => [newReturn, ...prev]);
+      fetch('/api/returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newReturn),
+      }).catch(() => {});
       logActivity('Catat Return', `Super Admin mencatat return ${amount} pcs ${item.nama_barang} (Selesai)`, 'RETURN', item.store_id);
       showToast('Return Dicatat', 'Data return berhasil dicatat dan stok telah otomatis bertambah.', 'success');
       return true;
     }
 
     setReturns((prev) => [newReturn, ...prev]);
+    fetch('/api/returns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newReturn),
+    }).catch(() => {});
     logActivity('Pengajuan Return', `Klaim return ${amount} pcs ${item.nama_barang} dari ${customerName}`, 'RETURN', item.store_id);
     addNotification(
       'Klaim Return Menunggu Approval Super Admin',
@@ -2685,21 +2822,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
+    const updatedRet: ReturnItem = {
+      ...ret,
+      status: decision,
+      diproses_oleh_id: currentUser.id,
+      diproses_oleh_name: currentUser.nama || currentUser.name,
+      tanggal_proses: dateStr,
+      catatan_proses: processNotes,
+      catatan_approval: processNotes,
+    };
+
+    markLocalMutation();
     setReturns((prev) =>
-      prev.map((r) =>
-        r.id === returnId
-          ? {
-              ...r,
-              status: decision,
-              diproses_oleh_id: currentUser.id,
-              diproses_oleh_name: currentUser.nama || currentUser.name,
-              tanggal_proses: dateStr,
-              catatan_proses: processNotes,
-              catatan_approval: processNotes,
-            }
-          : r
-      )
+      prev.map((r) => (r.id === returnId ? updatedRet : r))
     );
+    fetch('/api/returns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedRet),
+    }).catch(() => {});
 
     logActivity(
       decision === 'DITERIMA' ? 'Terima Return Barang' : 'Tolak Return Barang',
@@ -2872,20 +3013,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const computedStatus: AttendanceStatus = isLate ? 'TERLAMBAT' : 'HADIR';
     const computedKet = keterangan || (isLate ? `Terlambat ${checkInEval.lateMinutes} mnt (Jadwal: ${userJamMasuk} WIB)` : 'Hadir');
 
+    markLocalMutation();
+
     if (existing) {
+      const updatedAtt: AttendanceRecord = {
+        ...existing,
+        jam_masuk: timeStr,
+        status: computedStatus,
+        keterangan: computedKet,
+        catatan: computedKet,
+      };
       setAttendance((prev) =>
-        prev.map((a) =>
-          a.id === existing.id
-            ? {
-                ...a,
-                jam_masuk: timeStr,
-                status: computedStatus,
-                keterangan: computedKet,
-                catatan: computedKet,
-              }
-            : a
-        )
+        prev.map((a) => (a.id === existing.id ? updatedAtt : a))
       );
+      fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedAtt),
+      }).catch(() => {});
     } else {
       const newAtt: AttendanceRecord = {
         id: `att-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -2903,6 +3048,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         created_at: new Date().toLocaleString(),
       };
       setAttendance((prev) => [newAtt, ...prev]);
+      fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAtt),
+      }).catch(() => {});
     }
 
     if (isLate) {
@@ -3005,17 +3155,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    const updatedAtt: AttendanceRecord = {
+      ...existing,
+      jam_keluar: timeStr,
+      jam_pulang: timeStr,
+    };
+
+    markLocalMutation();
     setAttendance((prev) =>
-      prev.map((a) =>
-        a.id === existing.id
-          ? {
-              ...a,
-              jam_keluar: timeStr,
-              jam_pulang: timeStr,
-            }
-          : a
-      )
+      prev.map((a) => (a.id === existing.id ? updatedAtt : a))
     );
+    fetch('/api/attendance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedAtt),
+    }).catch(() => {});
 
     logActivity('Check Out Absensi', `${targetUser?.nama || targetUser?.name || 'Karyawan'} absen pulang pukul ${timeStr}`, 'ABSENSI', existing.store_id);
 
@@ -3071,6 +3225,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: new Date().toLocaleString(),
     };
 
+    markLocalMutation();
     if (existingIndex >= 0) {
       setAttendance((prev) =>
         prev.map((a, idx) => (idx === existingIndex ? recordData : a))
@@ -3078,6 +3233,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       setAttendance((prev) => [recordData, ...prev]);
     }
+    fetch('/api/attendance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(recordData),
+    }).catch(() => {});
 
     logActivity(
       'Input Absensi Mandiri / Manual',
@@ -3412,17 +3572,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: now,
       updated_at: now,
     };
+    markLocalMutation();
     setStores((prev) => [...prev, newStore]);
+    fetch('/api/stores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newStore),
+    }).catch(() => {});
     logActivity('Tambah Cabang Toko', `Membuka cabang baru: ${newStore.nama_toko} (${newStore.cabang})`, 'STORE');
     showToast('Toko Ditambahkan', `Cabang ${newStore.nama_toko} berhasil terdaftar.`, 'success');
   };
 
   const updateStore = (id: string, storeData: Partial<Store>) => {
     const now = new Date().toISOString().split('T')[0];
+    const targetStore = stores.find((s) => s.id === id);
+    if (targetStore) {
+      const updatedStore = { ...targetStore, ...storeData, updated_at: now };
+      markLocalMutation();
+      fetch('/api/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedStore),
+      }).catch(() => {});
+    }
     setStores((prev) =>
       prev.map((s) => (s.id === id ? { ...s, ...storeData, updated_at: now } : s))
     );
-    const targetStore = stores.find((s) => s.id === id);
     logActivity('Edit Toko', `Memperbarui info cabang toko: ${storeData.nama_toko || targetStore?.nama_toko || 'Cabang'}`, 'STORE', id);
     showToast('Toko Diperbarui', 'Informasi cabang berhasil disimpan.', 'success');
   };
@@ -3436,21 +3611,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   ) => {
     const now = new Date().toISOString().split('T')[0];
-    const updatedStores = stores.map((s) =>
-      s.id === storeId
-        ? {
-            ...s,
-            jam_masuk_standar: schedule.jam_masuk_standar,
-            jam_pulang_standar: schedule.jam_pulang_standar,
-            toleransi_keterlambatan_menit:
-              schedule.toleransi_keterlambatan_menit !== undefined
-                ? schedule.toleransi_keterlambatan_menit
-                : s.toleransi_keterlambatan_menit ?? 0,
-            updated_at: now,
-          }
-        : s
-    );
+    let updatedStoreObj: Store | null = null;
+    const updatedStores = stores.map((s) => {
+      if (s.id === storeId) {
+        updatedStoreObj = {
+          ...s,
+          jam_masuk_standar: schedule.jam_masuk_standar,
+          jam_pulang_standar: schedule.jam_pulang_standar,
+          toleransi_keterlambatan_menit:
+            schedule.toleransi_keterlambatan_menit !== undefined
+              ? schedule.toleransi_keterlambatan_menit
+              : s.toleransi_keterlambatan_menit ?? 0,
+          updated_at: now,
+        };
+        return updatedStoreObj;
+      }
+      return s;
+    });
+    markLocalMutation();
     setStores(updatedStores);
+    if (updatedStoreObj) {
+      fetch('/api/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedStoreObj),
+      }).catch(() => {});
+    }
 
     const { updated: reconciledAtt, hasChanges } = reconcileAttendanceRecords(attendance, users, updatedStores);
     if (hasChanges) {
@@ -3692,11 +3878,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Database MySQL Operations & Synchronization
-  const fetchDataFromMySQL = async (): Promise<boolean> => {
+  const fetchDataFromMySQL = async (isBackgroundPoll = false): Promise<boolean> => {
+    // Jangan timpa state lokal jika pengguna baru saja melakukan aksi (tambah/kurang stok, input transaksi, dll.) dalam 4.5 detik terakhir
+    if (isBackgroundPoll && Date.now() - lastLocalMutationTimeRef.current < 4500) {
+      return false;
+    }
     try {
       const res = await fetch('/api/data');
       if (!res.ok) return false;
       const json = await res.json();
+      if (isBackgroundPoll && Date.now() - lastLocalMutationTimeRef.current < 4500) {
+        return false;
+      }
       if (json.success && json.data) {
         isRemoteSyncRef.current = true;
         const d = json.data;
@@ -3770,8 +3963,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             store_id: s.store_id || firstStoreId,
           })));
         }
-        if (Array.isArray(d.inventory)) setInventory(d.inventory);
-        if (Array.isArray(d.transactions)) setTransactions(d.transactions);
+        if (Array.isArray(d.inventory)) {
+          setInventory(mergeServerInventoryWithLocalPending(d.inventory));
+        }
+        if (Array.isArray(d.transactions)) {
+          setTransactions(mergeServerTransactionsWithLocalPending(d.transactions));
+        }
         if (Array.isArray(d.returns)) setReturns(d.returns);
         if (Array.isArray(d.attendance)) setAttendance(d.attendance);
         if (Array.isArray(d.activityLogs)) {
